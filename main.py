@@ -1,73 +1,187 @@
-import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import Optional, List
-from crawl4ai import AsyncWebCrawler, AdaptiveCrawler, AdaptiveConfig
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+import os
+import httpx
 
 app = FastAPI(title="Crawl4AI Adaptive Crawler")
+security = HTTPBearer()
+
+PASSWORD = os.getenv("PASSWORD", "changeme")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials.credential != PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return credentials
 
 class CrawlRequest(BaseModel):
-    start_url: str
-    query: str
-    confidence_threshold: Optional[float] = 0.7
-    max_pages: Optional[int] = 20
-    top_k_links: Optional[int] = 3
-    min_gain_threshold: Optional[float] = 0.1
+    urls: list[str]
+    mode: str = "adaptive"
+    adaptive_crawler_config: dict = None
 
-class CrawlResponse(BaseModel):
-    success: bool
-    confidence: float
-    pages_crawled: int
-    relevant_content: List[dict]
-    message: str
+async def ask_deepseek(query: str, context: str) -> str:
+    """Send crawled content to DeepSeek-Reasoner and get plain language answer"""
+    
+    if not DEEPSEEK_API_KEY:
+        return "DeepSeek API key not configured"
+    
+    # Limit context size to avoid token limits
+    context = context[:15000]
+    
+    prompt = f"""Based on the following web content, please answer this question in plain language:
+
+**Question:** {query}
+
+**Web Content:**
+{context}
+
+**Instructions:**
+- Answer directly and concisely
+- Use bullet points for lists
+- If the information isn't found, say so
+- Cite the source URL when relevant
+"""
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek-reasoner",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a helpful research assistant. Analyze web content and provide clear, accurate answers."
+                        },
+                        {
+                            "role": "user", 
+                            "content": prompt
+                        }
+                    ],
+                    "max_tokens": 2000,
+                    "temperature": 0.7
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+            else:
+                return f"DeepSeek API error: {response.status_code} - {response.text}"
+                
+    except Exception as e:
+        return f"Error calling DeepSeek: {str(e)}"
 
 @app.get("/")
 async def root():
-    return {"message": "Crawl4AI Adaptive Crawler is running!"}
+    return {"message": "Crawl4AI Adaptive Crawler with DeepSeek-Reasoner is running!"}
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
-@app.post("/crawl", response_model=CrawlResponse)
-async def adaptive_crawl(request: CrawlRequest):
+@app.post("/crawl")
+async def crawl(request: CrawlRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
     try:
-        # Configure adaptive crawling
-        config = AdaptiveConfig(
-            confidence_threshold=request.confidence_threshold,
-            max_pages=request.max_pages,
-            top_k_links=request.top_k_links,
-            min_gain_threshold=request.min_gain_threshold
-        )
+        config = request.adaptive_crawler_config or {}
+        query = config.get("query", "")
+        max_pages = config.get("max_pages", 10)
+        use_ai = config.get("use_ai", True)  # Enable/disable AI answer
         
-        async with AsyncWebCrawler() as crawler:
-            adaptive = AdaptiveCrawler(crawler, config)
-            
-            # Start adaptive crawling
-            result = await adaptive.digest(
-                start_url=request.start_url,
-                query=request.query
-            )
-            
-            # Get relevant content
-            relevant_pages = adaptive.get_relevant_content(top_k=5)
-            
-            return CrawlResponse(
-                success=True,
-                confidence=adaptive.confidence,
-                pages_crawled=len(result.crawled_urls),
-                relevant_content=[
-                    {"url": page["url"], "score": page["score"]} 
-                    for page in relevant_pages
-                ],
-                message=f"Achieved {adaptive.confidence:.0%} confidence"
-            )
-            
+        browser_config = BrowserConfig(headless=True)
+        crawl_config = CrawlerRunConfig()
+        
+        crawled_pages = []
+        visited_urls = set()
+        urls_to_crawl = list(request.urls)
+        all_content = []  # Collect content for DeepSeek
+        
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            while urls_to_crawl and len(crawled_pages) < max_pages:
+                current_url = urls_to_crawl.pop(0)
+                
+                if current_url in visited_urls:
+                    continue
+                    
+                visited_urls.add(current_url)
+                
+                try:
+                    result = await crawler.arun(url=current_url, config=crawl_config)
+                    
+                    if result.success:
+                        # Calculate relevance score
+                        score = 0
+                        markdown_content = result.markdown or ""
+                        
+                        if query.lower() in markdown_content.lower():
+                            score = 1.0
+                        elif markdown_content:
+                            score = min(len(markdown_content) / 5000, 0.75)
+                        
+                        # Get page title
+                        title = ""
+                        if result.metadata and "title" in result.metadata:
+                            title = result.metadata["title"]
+                        
+                        # Collect content for AI processing
+                        if markdown_content:
+                            all_content.append(f"## Source: {current_url}\n### {title}\n{markdown_content[:3000]}")
+                        
+                        # Get internal links
+                        internal_links = []
+                        if result.links:
+                            for link in result.links.get("internal", []):
+                                link_url = link.get("href", "") if isinstance(link, dict) else link
+                                if link_url and link_url not in visited_urls:
+                                    internal_links.append(link_url)
+                                    if link_url not in urls_to_crawl:
+                                        urls_to_crawl.append(link_url)
+                        
+                        crawled_pages.append({
+                            "url": current_url,
+                            "score": round(score, 2),
+                            "title": title,
+                            "content_preview": markdown_content[:500] if markdown_content else "",
+                            "links_found": len(internal_links)
+                        })
+                        
+                except Exception as e:
+                    crawled_pages.append({
+                        "url": current_url,
+                        "score": 0,
+                        "title": "",
+                        "content_preview": "",
+                        "links_found": 0,
+                        "error": str(e)
+                    })
+        
+        # Combine all content for DeepSeek
+        combined_content = "\n\n---\n\n".join(all_content)
+        
+        # Get AI answer if enabled
+        ai_answer = ""
+        if use_ai and query and combined_content:
+            ai_answer = await ask_deepseek(query, combined_content)
+        
+        # Calculate average confidence
+        total_score = sum(p.get("score", 0) for p in crawled_pages)
+        avg_confidence = total_score / len(crawled_pages) if crawled_pages else 0
+        
+        return {
+            "success": True,
+            "query": query,
+            "answer": ai_answer,  # 👈 PLAIN LANGUAGE ANSWER!
+            "confidence": round(avg_confidence, 2),
+            "pages_crawled": len(crawled_pages),
+            "sources": crawled_pages,
+            "message": f"Crawled {len(crawled_pages)} pages"
+        }
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
-    import os
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
