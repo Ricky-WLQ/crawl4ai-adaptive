@@ -183,7 +183,7 @@ async def crawl(request: CrawlRequest, credentials: HTTPAuthorizationCredentials
                             "score": round(score, 2),
                             "title": title,
                             "content_length": len(clean_content),
-                            "content_preview": clean_content[:500],  # Just for response preview
+                            "content": clean_content,  # ← Full content, not truncated!
                             "links_found": links_found
                         })
                         
