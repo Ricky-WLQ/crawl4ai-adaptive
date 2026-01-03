@@ -41,8 +41,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxss1 \
     libxtst6 \
     libglib2.0-0 \
-    libnss3-dev \
-    libgdk-pixbuf2.0-0 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libcairo2 \
