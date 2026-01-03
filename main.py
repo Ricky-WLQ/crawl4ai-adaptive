@@ -52,7 +52,7 @@ Keep each list to 10-15 single-word keywords, lowercase only."""
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "deepseek-chat",
+                    "model": "deepseek-reasoner",
                     "messages": [
                         {"role": "system", "content": "You are a helpful assistant that returns only valid JSON."},
                         {"role": "user", "content": prompt}
@@ -223,7 +223,7 @@ async def crawl(request: CrawlRequest, credentials: HTTPAuthorizationCredentials
         
         config = request.adaptive_crawler_config or {}
         query = config.get("query", "")
-        max_pages = config.get("max_pages", 10)
+        max_pages = config.get("max_pages", 20)
         use_ai = config.get("use_ai", True)
         stay_on_domain = config.get("stay_on_domain", True)
         delay_between_requests = config.get("delay", 0.5)
