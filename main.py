@@ -1,8 +1,8 @@
 """
 Crawl4AI Adaptive Crawler
-- OpenRouter for embeddings (sentence-transformers/all-minilm-l12-v2)
-- DeepSeek for LLM operations and answer generation
-All cloud APIs - no local ML dependencies.
+- Statistical strategy for adaptive crawling (keyword-based relevance)
+- DeepSeek-reasoner for answer generation
+Lightweight - no heavy ML dependencies.
 """
 
 import os
@@ -23,9 +23,9 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig, LLMConfig
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
     ADAPTIVE_AVAILABLE = True
-    print("AdaptiveCrawler, AdaptiveConfig, LLMConfig imported successfully", flush=True)
+    print("AdaptiveCrawler, AdaptiveConfig imported successfully", flush=True)
 except ImportError as e:
     print(f"AdaptiveCrawler not available: {e}", flush=True)
     ADAPTIVE_AVAILABLE = False
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     print("=" * 50, flush=True)
     print("Crawl4AI Adaptive Crawler Starting...", flush=True)
     print(f"Adaptive Crawling Available: {ADAPTIVE_AVAILABLE}", flush=True)
-    print("All operations use cloud APIs (OpenRouter + DeepSeek)", flush=True)
+    print("Strategy: statistical | Answer: DeepSeek-reasoner", flush=True)
     print("=" * 50, flush=True)
     yield
     print("Shutting down...", flush=True)
@@ -164,10 +164,9 @@ async def root():
         "version": "1.0.0",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "features": [
-            "OpenRouter embeddings (sentence-transformers/all-minilm-l12-v2)",
-            "DeepSeek for LLM operations",
+            "Statistical strategy for adaptive crawling",
             "DeepSeek-reasoner for answer generation",
-            "All cloud APIs - no local ML dependencies"
+            "Lightweight - no heavy ML dependencies"
         ]
     }
 
@@ -195,36 +194,20 @@ async def adaptive_crawl(request: CrawlRequest):
             detail="DEEPSEEK_API_KEY environment variable not set"
         )
 
-    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not openrouter_api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="OPENROUTER_API_KEY environment variable not set"
-        )
-
     try:
-        # Configure OpenRouter for embeddings (cloud API)
-        embedding_config = LLMConfig(
-            provider="openrouter/sentence-transformers/all-minilm-l12-v2",
-            api_token=openrouter_api_key,
-            base_url="https://openrouter.ai/api/v1"
-        )
-
-        # Use embedding strategy with cloud APIs
-        # DeepSeek will be used via DEEPSEEK_API_KEY env var for LLM operations
+        # Use statistical strategy (no external embedding API needed)
+        # DeepSeek is used for final answer generation
         config = AdaptiveConfig(
             confidence_threshold=request.confidence_threshold,
             max_pages=request.max_pages,
             top_k_links=request.top_k_links,
             min_gain_threshold=request.min_gain_threshold,
-            strategy="embedding",
-            embedding_model="openrouter/sentence-transformers/all-minilm-l12-v2",
-            embedding_llm_config=embedding_config
+            strategy="statistical"
         )
 
         print(f"\nStarting adaptive crawl for: {request.query}", flush=True)
         print(f"Starting URL: {request.start_url}", flush=True)
-        print("Embeddings: OpenRouter (sentence-transformers/all-minilm-l12-v2)", flush=True)
+        print("Strategy: statistical (keyword-based relevance)", flush=True)
 
         async with AsyncWebCrawler() as crawler:
             adaptive = AdaptiveCrawler(crawler, config)
