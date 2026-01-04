@@ -210,14 +210,8 @@ async def adaptive_crawl(request: CrawlRequest):
             base_url="https://openrouter.ai/api/v1"
         )
 
-        # Configure DeepSeek for LLM operations (query variations, relevance scoring)
-        llm_config = LLMConfig(
-            provider="deepseek/deepseek-chat",
-            api_token=deepseek_api_key,
-            base_url="https://api.deepseek.com"
-        )
-
         # Use embedding strategy with cloud APIs
+        # DeepSeek will be used via DEEPSEEK_API_KEY env var for LLM operations
         config = AdaptiveConfig(
             confidence_threshold=request.confidence_threshold,
             max_pages=request.max_pages,
@@ -225,14 +219,12 @@ async def adaptive_crawl(request: CrawlRequest):
             min_gain_threshold=request.min_gain_threshold,
             strategy="embedding",
             embedding_model="openrouter/sentence-transformers/all-minilm-l12-v2",
-            embedding_llm_config=embedding_config,
-            llm_config=llm_config
+            embedding_llm_config=embedding_config
         )
 
         print(f"\nStarting adaptive crawl for: {request.query}", flush=True)
         print(f"Starting URL: {request.start_url}", flush=True)
         print("Embeddings: OpenRouter (sentence-transformers/all-minilm-l12-v2)", flush=True)
-        print("LLM: DeepSeek", flush=True)
 
         async with AsyncWebCrawler() as crawler:
             adaptive = AdaptiveCrawler(crawler, config)
