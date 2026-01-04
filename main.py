@@ -1,6 +1,7 @@
 """
 Crawl4AI Adaptive Crawler with DeepSeek + Sentence-Transformers
 Uses Crawl4AI v0.7.8 adaptive crawling with embedding strategy.
+OpenRouter for LLM calls, DeepSeek-reasoner for answer generation.
 """
 
 import os
@@ -21,9 +22,9 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig, LLMConfig
     ADAPTIVE_AVAILABLE = True
-    print("AdaptiveCrawler and AdaptiveConfig imported successfully", flush=True)
+    print("AdaptiveCrawler, AdaptiveConfig, LLMConfig imported successfully", flush=True)
 except ImportError as e:
     print(f"AdaptiveCrawler not available: {e}", flush=True)
     ADAPTIVE_AVAILABLE = False
@@ -43,7 +44,7 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with DeepSeek reasoning and Sentence-Transformers embeddings",
+    description="Intelligent web crawler with Sentence-Transformers embeddings and DeepSeek reasoning",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -159,7 +160,12 @@ async def root():
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
         "version": "1.0.0",
-        "adaptive_available": ADAPTIVE_AVAILABLE
+        "adaptive_available": ADAPTIVE_AVAILABLE,
+        "features": [
+            "Sentence-Transformers embeddings (all-MiniLM-L12-v2)",
+            "OpenRouter for LLM operations",
+            "DeepSeek-reasoner for answer generation"
+        ]
     }
 
 
@@ -186,30 +192,35 @@ async def adaptive_crawl(request: CrawlRequest):
             detail="DEEPSEEK_API_KEY environment variable not set"
         )
 
+    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="OPENROUTER_API_KEY environment variable not set"
+        )
+
     try:
+        # Configure LLM for embedding strategy using OpenRouter
+        llm_config = LLMConfig(
+            provider="openrouter/google/gemini-2.0-flash-001",
+            api_token=openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
+
         # Use embedding strategy with sentence-transformers
-        # Falls back to statistical if embedding fails
-        try:
-            config = AdaptiveConfig(
-                confidence_threshold=request.confidence_threshold,
-                max_pages=request.max_pages,
-                top_k_links=request.top_k_links,
-                min_gain_threshold=request.min_gain_threshold,
-                strategy="embedding",
-                embedding_model="sentence-transformers/all-MiniLM-L6-v2"
-            )
-        except Exception as e:
-            print(f"Embedding strategy failed, using statistical: {e}", flush=True)
-            config = AdaptiveConfig(
-                confidence_threshold=request.confidence_threshold,
-                max_pages=request.max_pages,
-                top_k_links=request.top_k_links,
-                min_gain_threshold=request.min_gain_threshold,
-                strategy="statistical"
-            )
+        config = AdaptiveConfig(
+            confidence_threshold=request.confidence_threshold,
+            max_pages=request.max_pages,
+            top_k_links=request.top_k_links,
+            min_gain_threshold=request.min_gain_threshold,
+            strategy="embedding",
+            embedding_model="sentence-transformers/all-MiniLM-L12-v2",
+            embedding_llm_config=llm_config
+        )
 
         print(f"\nStarting adaptive crawl for: {request.query}", flush=True)
         print(f"Starting URL: {request.start_url}", flush=True)
+        print(f"Strategy: embedding (all-MiniLM-L12-v2) with OpenRouter", flush=True)
 
         async with AsyncWebCrawler() as crawler:
             adaptive = AdaptiveCrawler(crawler, config)
