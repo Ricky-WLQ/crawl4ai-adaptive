@@ -1,12 +1,13 @@
-# Web Crawling - includes AdaptiveCrawler
-crawl4ai>=0.7.8
+# Core crawling - Crawl4AI v0.7.8 with adaptive crawling support
+crawl4ai==0.7.8
 
-# Web Framework
-fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
+# Web framework
+fastapi
+uvicorn[standard]
 
-# DeepSeek API (OpenAI-compatible)
-openai>=1.0.0
+# Async HTTP client for DeepSeek API
+httpx
 
-# Data validation
-pydantic>=2.0.0
+# Text processing (for additional content parsing)
+beautifulsoup4
+lxml
