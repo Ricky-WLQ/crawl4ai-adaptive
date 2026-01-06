@@ -7,3 +7,6 @@ uvicorn[standard]
 
 # Async HTTP client for API calls (DeepSeek, OpenRouter)
 httpx
+
+# For cosine similarity calculations (embeddings)
+numpy
