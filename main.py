@@ -1,8 +1,8 @@
 """
-Crawl4AI Deep Crawler with DeepSeek
-- BestFirst crawling strategy (prioritizes relevant links)
-- Scores links by relevance to your query
-- Stays on the same site
+Crawl4AI Adaptive Crawler with OpenRouter Embeddings + DeepSeek Reasoner
+- Uses AdaptiveCrawler for intelligent subpage discovery
+- OpenRouter API for semantic embeddings (text-embedding-3-small)
+- Automatically stops when sufficient information is gathered
 - DeepSeek-reasoner for answer generation
 """
 
@@ -16,20 +16,30 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# Test imports at startup
+# Core crawl4ai imports
 try:
-    from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, BrowserConfig
-    print("AsyncWebCrawler imported successfully", flush=True)
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+    print("Core crawl4ai imported successfully", flush=True)
 except ImportError as e:
-    print(f"Failed to import AsyncWebCrawler: {e}", flush=True)
+    print(f"Failed to import core crawl4ai: {e}", flush=True)
     sys.exit(1)
 
+# Adaptive crawler imports
+try:
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig, LLMConfig
+    ADAPTIVE_AVAILABLE = True
+    print("AdaptiveCrawler imported successfully", flush=True)
+except ImportError as e:
+    print(f"AdaptiveCrawler not available: {e}", flush=True)
+    ADAPTIVE_AVAILABLE = False
+
+# Fallback: Deep crawling imports (if adaptive not available)
 try:
     from crawl4ai.deep_crawling import BestFirstCrawlingStrategy
     from crawl4ai.deep_crawling.filters import FilterChain, DomainFilter
     from crawl4ai.deep_crawling.scorers import KeywordRelevanceScorer
     DEEP_CRAWL_AVAILABLE = True
-    print("Deep crawling components imported successfully", flush=True)
+    print("Deep crawling (fallback) imported successfully", flush=True)
 except ImportError as e:
     print(f"Deep crawling not available: {e}", flush=True)
     DEEP_CRAWL_AVAILABLE = False
@@ -38,36 +48,39 @@ except ImportError as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler."""
-    print("=" * 50, flush=True)
-    print("Crawl4AI Deep Crawler Starting...", flush=True)
-    print(f"Deep Crawling Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
-    print("Strategy: BestFirst (relevance-based prioritization)", flush=True)
-    print("Answer: DeepSeek-reasoner", flush=True)
-    print("=" * 50, flush=True)
+    print("=" * 60, flush=True)
+    print("Crawl4AI Adaptive Crawler Starting...", flush=True)
+    print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
+    print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
+    print("Embedding: OpenRouter (text-embedding-3-small)", flush=True)
+    print("Answer Generation: DeepSeek-reasoner", flush=True)
+    print("=" * 60, flush=True)
     yield
     print("Shutting down...", flush=True)
 
 
 app = FastAPI(
-    title="Crawl4AI Deep Crawler",
-    description="Deep web crawler with domain restriction and DeepSeek reasoning",
-    version="1.0.0",
+    title="Crawl4AI Adaptive Crawler",
+    description="Intelligent web crawler with semantic embeddings and DeepSeek reasoning",
+    version="2.0.0",
     lifespan=lifespan
 )
 
 
 class CrawlRequest(BaseModel):
-    """Request model for deep crawling."""
+    """Request model for adaptive crawling."""
     start_url: str
     query: str
-    max_depth: Optional[int] = 3
-    max_pages: Optional[int] = 10
+    max_pages: Optional[int] = 20
+    confidence_threshold: Optional[float] = 0.7
+    use_embeddings: Optional[bool] = True
 
 
 class CrawlResponse(BaseModel):
     """Response model with direct answer."""
     success: bool
     answer: str
+    confidence: float
     pages_crawled: int
     sources: List[dict]
     message: str
@@ -77,7 +90,7 @@ async def call_deepseek(
     query: str,
     context: str,
     api_key: str,
-    max_tokens: int = 2000
+    max_tokens: int = 3000
 ) -> str:
     """Call DeepSeek API to generate an answer."""
 
@@ -128,90 +141,21 @@ Based on the above content, provide a detailed and accurate answer to the query.
         return result["choices"][0]["message"]["content"]
 
 
-def compute_content_relevance(content: str, keywords: List[str], url: str = "") -> float:
-    """
-    Compute relevance score based on keyword density and URL matching.
-    Returns a score between 0.0 and 1.0
-    """
-    if not content or not keywords:
-        return 0.0
-
-    content_lower = content.lower()
-    url_lower = url.lower()
-
-    # Count keyword matches
-    matches = sum(1 for kw in keywords if kw.lower() in content_lower)
-    total_occurrences = sum(content_lower.count(kw.lower()) for kw in keywords)
-
-    # Normalize by content length (density-based scoring)
-    content_length = len(content_lower)
-    density = (total_occurrences * 100) / content_length if content_length > 0 else 0
-
-    # Coverage: what fraction of keywords appear
-    coverage_score = matches / len(keywords) if keywords else 0
-
-    # Density score: normalized keyword frequency (cap at reasonable density)
-    density_score = min(density / 2.0, 1.0)  # 2% density = max score
-
-    # URL bonus: if keywords appear in URL, it's likely more relevant
-    url_matches = sum(1 for kw in keywords if kw.lower() in url_lower)
-    url_bonus = (url_matches / len(keywords)) * 0.2 if keywords else 0
-
-    # Combined score
-    base_score = (coverage_score * 0.4) + (density_score * 0.4)
-    final_score = min(base_score + url_bonus, 1.0)
-
-    return round(final_score, 3)
-
-
-def rank_pages_by_relevance(results: List, keywords: List[str]) -> List:
-    """
-    Rank crawled pages by content relevance to keywords.
-    Returns sorted list with relevance scores attached.
-    """
-    scored_results = []
-
-    for result in results:
-        url = result.url if hasattr(result, 'url') else ""
-        content = ""
-        if hasattr(result, 'markdown') and result.markdown:
-            content = result.markdown
-        elif hasattr(result, 'text') and result.text:
-            content = result.text
-        elif hasattr(result, 'html') and result.html:
-            content = result.html
-
-        score = compute_content_relevance(content, keywords, url)
-        scored_results.append((result, score))
-
-    # Sort by score descending
-    scored_results.sort(key=lambda x: x[1], reverse=True)
-
-    return scored_results
-
-
-def format_context_for_llm(scored_results: List, max_chars: int = 20000) -> str:
-    """Format crawled pages into context for LLM, prioritizing high-relevance pages."""
+def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) -> str:
+    """Format relevant pages from AdaptiveCrawler into context for LLM."""
     context_parts = []
     total_chars = 0
 
-    for i, (result, score) in enumerate(scored_results, 1):
-        url = result.url if hasattr(result, 'url') else str(result)
-
-        # Get markdown content (cleaner than raw HTML)
-        content = ""
-        if hasattr(result, 'markdown') and result.markdown:
-            content = result.markdown
-        elif hasattr(result, 'text') and result.text:
-            content = result.text
-        elif hasattr(result, 'html') and result.html:
-            content = result.html[:5000]
+    for i, page in enumerate(relevant_pages, 1):
+        url = page.get('url', 'unknown')
+        score = page.get('score', 0)
+        content = page.get('content', '')
 
         if not content or len(content) < 50:
             continue
 
         # Truncate individual page content
-        page_text = content[:4000] if len(content) > 4000 else content
+        page_text = content[:5000] if len(content) > 5000 else content
 
         entry = f"""
 === Page {i} (Relevance: {score:.0%}): {url} ===
@@ -231,12 +175,15 @@ def format_context_for_llm(scored_results: List, max_chars: int = 20000) -> str:
 async def root():
     """Service status endpoint."""
     return {
-        "message": "Crawl4AI Deep Crawler is running!",
-        "version": "1.0.0",
-        "deep_crawl_available": DEEP_CRAWL_AVAILABLE,
+        "message": "Crawl4AI Adaptive Crawler is running!",
+        "version": "2.0.0",
+        "adaptive_available": ADAPTIVE_AVAILABLE,
+        "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "features": [
-            "BestFirst crawling (prioritizes relevant links)",
-            "Domain restriction (stays on same site)",
+            "AdaptiveCrawler with semantic embeddings",
+            "Intelligent subpage discovery",
+            "Automatic confidence-based stopping",
+            "OpenRouter embeddings (text-embedding-3-small)",
             "DeepSeek-reasoner for answer generation"
         ]
     }
@@ -249,22 +196,17 @@ async def health():
 
 
 @app.post("/crawl", response_model=CrawlResponse)
-async def deep_crawl(request: CrawlRequest):
+async def adaptive_crawl(request: CrawlRequest):
     """
-    Perform deep crawling and return a direct answer.
+    Perform adaptive crawling and return a direct answer.
 
-    - Stays on the same domain (no external links)
-    - Uses BestFirst strategy to prioritize relevant links
-    - Scores links by keyword relevance to your query
-    - DeepSeek-reasoner generates answer from crawled content
+    - Uses AdaptiveCrawler for intelligent link discovery
+    - Semantic embeddings score pages by content relevance (not just URL)
+    - Automatically stops when confident enough information is gathered
+    - DeepSeek-reasoner generates comprehensive answer
     """
 
-    if not DEEP_CRAWL_AVAILABLE:
-        raise HTTPException(
-            status_code=500,
-            detail="Deep crawling not available. Check crawl4ai installation."
-        )
-
+    # Check for required API keys
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not deepseek_api_key:
         raise HTTPException(
@@ -272,150 +214,41 @@ async def deep_crawl(request: CrawlRequest):
             detail="DEEPSEEK_API_KEY environment variable not set"
         )
 
+    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openrouter_api_key and request.use_embeddings:
+        print("Warning: OPENROUTER_API_KEY not set, falling back to statistical strategy", flush=True)
+
     try:
         # Extract domain from start URL
         parsed_url = urlparse(request.start_url)
         domain = parsed_url.netloc
 
-        print(f"\n{'='*50}", flush=True)
+        print(f"\n{'='*60}", flush=True)
         print(f"Query: {request.query}", flush=True)
         print(f"Start URL: {request.start_url}", flush=True)
-        print(f"Domain: {domain} (external links blocked)", flush=True)
-        print(f"Max depth: {request.max_depth}, Max pages: {request.max_pages}", flush=True)
-        print(f"{'='*50}", flush=True)
+        print(f"Domain: {domain}", flush=True)
+        print(f"Max pages: {request.max_pages}", flush=True)
+        print(f"Confidence threshold: {request.confidence_threshold}", flush=True)
+        print(f"Use embeddings: {request.use_embeddings and bool(openrouter_api_key)}", flush=True)
+        print(f"{'='*60}", flush=True)
 
-        # Create domain filter to stay on same site
-        domain_filter = DomainFilter(
-            allowed_domains=[domain],
-            blocked_domains=[]
-        )
-
-        # Extract keywords from query for scoring
-        # Filter common stop words and keep meaningful terms
-        stop_words = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-            'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-            'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
-            'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
-            'what', 'which', 'who', 'whom', 'how', 'when', 'where', 'why',
-            'all', 'each', 'every', 'both', 'few', 'more', 'most', 'some',
-            'any', 'no', 'not', 'only', 'same', 'so', 'than', 'too', 'very',
-            'just', 'also', 'now', 'here', 'there', 'then', 'if', 'about',
-            'show', 'get', 'find', 'give', 'me', 'my', 'your', 'our', 'want',
-            'need', 'please', 'help', 'using', 'use'
-        }
-        keywords = [word.lower() for word in request.query.split()
-                   if len(word) > 2 and word.lower() not in stop_words]
-
-        # Also extract multi-word phrases (bigrams) for better matching
-        words = request.query.lower().split()
-        for i in range(len(words) - 1):
-            phrase = f"{words[i]} {words[i+1]}"
-            # Add phrase if neither word is a stop word
-            if words[i] not in stop_words and words[i+1] not in stop_words:
-                keywords.append(phrase)
-
-        print(f"Keywords for scoring: {keywords}", flush=True)
-
-        # Create keyword scorer to prioritize relevant links
-        # Higher weight = stronger preference for URLs containing keywords
-        url_scorer = KeywordRelevanceScorer(
-            keywords=keywords,
-            weight=0.9
-        )
-
-        # Create BestFirst crawl strategy (prioritizes relevant links)
-        strategy = BestFirstCrawlingStrategy(
-            max_depth=request.max_depth,
-            include_external=False,  # Stay on same domain
-            max_pages=request.max_pages,
-            filter_chain=FilterChain([domain_filter]),
-            url_scorer=url_scorer
-        )
-
-        # Configure crawler
-        crawl_config = CrawlerRunConfig(
-            deep_crawl_strategy=strategy,
-            stream=False,
-            verbose=True
-        )
-
-        browser_config = BrowserConfig(
-            headless=True,
-            verbose=False
-        )
-
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            print("Starting crawl...", flush=True)
-            results = await crawler.arun(
-                url=request.start_url,
-                config=crawl_config
+        if ADAPTIVE_AVAILABLE:
+            return await run_adaptive_crawl(
+                request=request,
+                deepseek_api_key=deepseek_api_key,
+                openrouter_api_key=openrouter_api_key,
+                domain=domain
             )
-
-            # Handle results (could be list or single result)
-            if isinstance(results, list):
-                crawled_pages = results
-            else:
-                crawled_pages = [results] if results else []
-
-            # Filter out failed results
-            successful_pages = [r for r in crawled_pages if hasattr(r, 'success') and r.success]
-
-            print(f"Crawled {len(successful_pages)} pages successfully", flush=True)
-
-            if not successful_pages:
-                return CrawlResponse(
-                    success=False,
-                    answer="No content could be crawled from the provided URL.",
-                    pages_crawled=0,
-                    sources=[],
-                    message="Crawling failed - no pages found"
-                )
-
-            # Rank pages by CONTENT relevance (works even with non-descriptive URLs)
-            print(f"\nRanking pages by content relevance to: {keywords}", flush=True)
-            ranked_pages = rank_pages_by_relevance(successful_pages, keywords)
-
-            # Show top ranked pages
-            print("Top relevant pages:", flush=True)
-            for i, (page, score) in enumerate(ranked_pages[:5], 1):
-                url = page.url if hasattr(page, 'url') else 'unknown'
-                print(f"  {i}. {score:.0%} - {url}", flush=True)
-
-            # Format context for DeepSeek (uses ranked pages)
-            context = format_context_for_llm(ranked_pages)
-
-            if not context.strip():
-                return CrawlResponse(
-                    success=False,
-                    answer="Pages were crawled but no readable content was extracted.",
-                    pages_crawled=len(successful_pages),
-                    sources=[],
-                    message="No content extracted"
-                )
-
-            print(f"\nContext length: {len(context)} chars", flush=True)
-            print("Generating answer with DeepSeek-reasoner...", flush=True)
-
-            answer = await call_deepseek(
-                query=request.query,
-                context=context,
-                api_key=deepseek_api_key
+        elif DEEP_CRAWL_AVAILABLE:
+            return await run_fallback_deep_crawl(
+                request=request,
+                deepseek_api_key=deepseek_api_key,
+                domain=domain
             )
-
-            # Prepare sources with relevance scores
-            sources = []
-            for page, score in ranked_pages[:10]:
-                url = page.url if hasattr(page, 'url') else str(page)
-                sources.append({"url": url, "relevance": round(score, 3)})
-
-            return CrawlResponse(
-                success=True,
-                answer=answer,
-                pages_crawled=len(successful_pages),
-                sources=sources,
-                message=f"Crawled {len(successful_pages)} pages from {domain}, ranked by content relevance"
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Neither AdaptiveCrawler nor deep crawling is available"
             )
 
     except HTTPException:
@@ -425,6 +258,269 @@ async def deep_crawl(request: CrawlRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def run_adaptive_crawl(
+    request: CrawlRequest,
+    deepseek_api_key: str,
+    openrouter_api_key: Optional[str],
+    domain: str
+) -> CrawlResponse:
+    """Run crawl using AdaptiveCrawler with optional embeddings."""
+
+    # Configure adaptive strategy
+    if request.use_embeddings and openrouter_api_key:
+        # Use embedding strategy with OpenRouter
+        print("Using EMBEDDING strategy with OpenRouter", flush=True)
+        config = AdaptiveConfig(
+            strategy="embedding",
+            embedding_llm_config=LLMConfig(
+                provider="openai/text-embedding-3-small",
+                api_token=openrouter_api_key,
+                base_url="https://openrouter.ai/api/v1"
+            ),
+            confidence_threshold=request.confidence_threshold,
+            max_pages=request.max_pages,
+            top_k_links=5,
+            min_gain_threshold=0.05
+        )
+    else:
+        # Use statistical strategy (BM25) - no embeddings
+        print("Using STATISTICAL (BM25) strategy", flush=True)
+        config = AdaptiveConfig(
+            strategy="statistical",
+            confidence_threshold=request.confidence_threshold,
+            max_pages=request.max_pages,
+            top_k_links=5,
+            min_gain_threshold=0.05
+        )
+
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=False
+    )
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        adaptive = AdaptiveCrawler(crawler, config=config)
+
+        print("Starting adaptive crawl...", flush=True)
+        result = await adaptive.digest(
+            start_url=request.start_url,
+            query=request.query
+        )
+
+        # Get crawl statistics
+        confidence = adaptive.confidence
+        crawled_urls = result.crawled_urls if hasattr(result, 'crawled_urls') else []
+        pages_crawled = len(crawled_urls)
+
+        print(f"Crawl complete: {pages_crawled} pages, {confidence:.0%} confidence", flush=True)
+
+        # Print stats
+        adaptive.print_stats()
+
+        if pages_crawled == 0:
+            return CrawlResponse(
+                success=False,
+                answer="No pages could be crawled from the provided URL.",
+                confidence=0.0,
+                pages_crawled=0,
+                sources=[],
+                message="Crawling failed - no pages found"
+            )
+
+        # Get most relevant content
+        relevant_pages = adaptive.get_relevant_content(top_k=10)
+
+        print(f"\nTop relevant pages:", flush=True)
+        for i, page in enumerate(relevant_pages[:5], 1):
+            print(f"  {i}. {page['score']:.0%} - {page['url']}", flush=True)
+
+        # Format context for DeepSeek
+        context = format_adaptive_context(relevant_pages)
+
+        if not context.strip():
+            return CrawlResponse(
+                success=False,
+                answer="Pages were crawled but no readable content was extracted.",
+                confidence=confidence,
+                pages_crawled=pages_crawled,
+                sources=[],
+                message="No content extracted"
+            )
+
+        print(f"\nContext length: {len(context)} chars", flush=True)
+        print("Generating answer with DeepSeek-reasoner...", flush=True)
+
+        answer = await call_deepseek(
+            query=request.query,
+            context=context,
+            api_key=deepseek_api_key
+        )
+
+        # Prepare sources
+        sources = []
+        for page in relevant_pages[:10]:
+            sources.append({
+                "url": page.get('url', 'unknown'),
+                "relevance": round(page.get('score', 0), 3)
+            })
+
+        return CrawlResponse(
+            success=True,
+            answer=answer,
+            confidence=round(confidence, 3),
+            pages_crawled=pages_crawled,
+            sources=sources,
+            message=f"Adaptive crawl complete: {pages_crawled} pages, {confidence:.0%} confidence"
+        )
+
+
+async def run_fallback_deep_crawl(
+    request: CrawlRequest,
+    deepseek_api_key: str,
+    domain: str
+) -> CrawlResponse:
+    """Fallback to deep crawling if AdaptiveCrawler is not available."""
+
+    print("Using FALLBACK deep crawl (BestFirst strategy)", flush=True)
+
+    # Create domain filter
+    domain_filter = DomainFilter(
+        allowed_domains=[domain],
+        blocked_domains=[]
+    )
+
+    # Extract keywords from query
+    stop_words = {
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+        'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
+        'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+        'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
+        'what', 'which', 'who', 'how', 'when', 'where', 'why', 'i', 'you',
+        'show', 'get', 'find', 'give', 'me', 'my', 'your', 'want', 'need'
+    }
+    keywords = [
+        word.lower() for word in request.query.split()
+        if len(word) > 2 and word.lower() not in stop_words
+    ]
+
+    print(f"Keywords: {keywords}", flush=True)
+
+    # Create keyword scorer
+    url_scorer = KeywordRelevanceScorer(
+        keywords=keywords,
+        weight=0.9
+    )
+
+    # Create BestFirst strategy
+    strategy = BestFirstCrawlingStrategy(
+        max_depth=3,
+        include_external=False,
+        max_pages=request.max_pages,
+        filter_chain=FilterChain([domain_filter]),
+        url_scorer=url_scorer
+    )
+
+    crawl_config = CrawlerRunConfig(
+        deep_crawl_strategy=strategy,
+        stream=False,
+        verbose=True
+    )
+
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=False
+    )
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        print("Starting deep crawl...", flush=True)
+        results = await crawler.arun(
+            url=request.start_url,
+            config=crawl_config
+        )
+
+        # Handle results
+        if isinstance(results, list):
+            crawled_pages = results
+        else:
+            crawled_pages = [results] if results else []
+
+        successful_pages = [r for r in crawled_pages if hasattr(r, 'success') and r.success]
+        pages_crawled = len(successful_pages)
+
+        print(f"Crawled {pages_crawled} pages successfully", flush=True)
+
+        if not successful_pages:
+            return CrawlResponse(
+                success=False,
+                answer="No content could be crawled from the provided URL.",
+                confidence=0.0,
+                pages_crawled=0,
+                sources=[],
+                message="Crawling failed - no pages found"
+            )
+
+        # Format context (simple approach for fallback)
+        context_parts = []
+        total_chars = 0
+        max_chars = 25000
+
+        for i, result in enumerate(successful_pages[:10], 1):
+            url = result.url if hasattr(result, 'url') else str(result)
+            content = ""
+            if hasattr(result, 'markdown') and result.markdown:
+                content = result.markdown
+            elif hasattr(result, 'text') and result.text:
+                content = result.text
+
+            if not content or len(content) < 50:
+                continue
+
+            page_text = content[:5000] if len(content) > 5000 else content
+            entry = f"\n=== Page {i}: {url} ===\n{page_text}\n"
+
+            if total_chars + len(entry) > max_chars:
+                break
+
+            context_parts.append(entry)
+            total_chars += len(entry)
+
+        context = "\n".join(context_parts)
+
+        if not context.strip():
+            return CrawlResponse(
+                success=False,
+                answer="Pages were crawled but no readable content was extracted.",
+                confidence=0.0,
+                pages_crawled=pages_crawled,
+                sources=[],
+                message="No content extracted"
+            )
+
+        print(f"Context length: {len(context)} chars", flush=True)
+        print("Generating answer with DeepSeek-reasoner...", flush=True)
+
+        answer = await call_deepseek(
+            query=request.query,
+            context=context,
+            api_key=deepseek_api_key
+        )
+
+        # Prepare sources
+        sources = []
+        for result in successful_pages[:10]:
+            url = result.url if hasattr(result, 'url') else str(result)
+            sources.append({"url": url, "relevance": 0.5})
+
+        return CrawlResponse(
+            success=True,
+            answer=answer,
+            confidence=0.5,  # No confidence score in fallback mode
+            pages_crawled=pages_crawled,
+            sources=sources,
+            message=f"Deep crawl complete: {pages_crawled} pages (fallback mode)"
+        )
 
 
 if __name__ == "__main__":
