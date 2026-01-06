@@ -74,6 +74,7 @@ class CrawlRequest(BaseModel):
     max_pages: Optional[int] = 20
     confidence_threshold: Optional[float] = 0.7
     use_embeddings: Optional[bool] = True
+    embedding_model: Optional[str] = "qwen/qwen3-embedding-8b"  # Qwen embedding model via OpenRouter
 
 
 class CrawlResponse(BaseModel):
@@ -269,13 +270,15 @@ async def run_adaptive_crawl(
     """Run crawl using AdaptiveCrawler with optional embeddings."""
 
     # Configure adaptive strategy
-    if request.use_embeddings and openrouter_api_key:
+    use_embedding_strategy = request.use_embeddings and openrouter_api_key
+
+    if use_embedding_strategy:
         # Use embedding strategy with OpenRouter
-        print("Using EMBEDDING strategy with OpenRouter", flush=True)
+        print(f"Using EMBEDDING strategy with OpenRouter ({request.embedding_model})", flush=True)
         config = AdaptiveConfig(
             strategy="embedding",
             embedding_llm_config=LLMConfig(
-                provider="openai/text-embedding-3-small",
+                provider=request.embedding_model,
                 api_token=openrouter_api_key,
                 base_url="https://openrouter.ai/api/v1"
             ),
