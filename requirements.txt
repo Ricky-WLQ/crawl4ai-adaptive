@@ -1,6 +1,10 @@
 # Core crawling - Crawl4AI with AdaptiveCrawler support
 crawl4ai>=0.7.0
 
+# Local sentence-transformers for EMBEDDING strategy
+# Used for semantic similarity calculations during crawling (no API cost!)
+sentence-transformers
+
 # Web framework
 fastapi
 uvicorn[standard]
