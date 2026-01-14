@@ -1,16 +1,18 @@
 """
-Crawl4AI Adaptive Crawler with Custom OpenRouter Embeddings + DeepSeek Reasoner
-- Uses AdaptiveCrawler with BM25 for reliable crawling
-- Custom OpenRouter embedding API calls for semantic re-ranking
+Crawl4AI Adaptive Crawler with Native Embedding Strategy + DeepSeek Reasoner
+- Uses AdaptiveCrawler with EMBEDDING strategy for semantic link selection
+- OpenRouter embeddings (qwen3-embedding-8b) for both crawling and re-ranking
 - Automatically stops when sufficient information is gathered
 - DeepSeek-reasoner for answer generation
+
+Version: 3.0.0
 """
 
 import os
 import sys
 import numpy as np
 from contextlib import asynccontextmanager
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from urllib.parse import urlparse
 
 import httpx
@@ -27,12 +29,22 @@ except ImportError as e:
 
 # Adaptive crawler imports
 try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig, LLMConfig
     ADAPTIVE_AVAILABLE = True
     print("AdaptiveCrawler imported successfully", flush=True)
 except ImportError as e:
     print(f"AdaptiveCrawler not available: {e}", flush=True)
     ADAPTIVE_AVAILABLE = False
+
+# Check if LLMConfig is available (for native embedding strategy)
+LLMCONFIG_AVAILABLE = 'LLMConfig' in dir()
+if not LLMCONFIG_AVAILABLE:
+    try:
+        from crawl4ai import LLMConfig
+        LLMCONFIG_AVAILABLE = True
+    except ImportError:
+        print("LLMConfig not available, will use fallback embedding", flush=True)
+        LLMCONFIG_AVAILABLE = False
 
 # Fallback: Deep crawling imports (if adaptive not available)
 try:
@@ -136,12 +148,12 @@ async def rerank_by_embeddings(
         print("Failed to get query embedding, returning original order", flush=True)
         return pages[:top_k]
 
-    # Get embeddings for page content (use first 1000 chars for efficiency)
+    # Get embeddings for page content (use first 4000 chars for better coverage)
     page_texts = []
     for page in pages:
         content = page.get('content', '')
-        # Use title + first part of content for embedding
-        text = content[:1500] if content else ''
+        # Use more content for better semantic matching (especially for legal docs)
+        text = content[:4000] if content else ''
         page_texts.append(text)
 
     # Batch embed all pages
@@ -187,11 +199,12 @@ async def rerank_by_embeddings(
 async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.0.0 Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
+    print(f"LLMConfig Available: {LLMCONFIG_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
-    print("Crawling: BM25 Statistical Strategy", flush=True)
-    print("Re-ranking: OpenRouter Embeddings (if API key provided)", flush=True)
+    print("Crawling Strategy: EMBEDDING (semantic link selection)", flush=True)
+    print("Embedding Provider: OpenRouter (qwen3-embedding-8b)", flush=True)
     print("Answer Generation: DeepSeek-reasoner", flush=True)
     print("=" * 60, flush=True)
     yield
@@ -200,8 +213,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with OpenRouter embeddings and DeepSeek reasoning",
-    version="2.2.0",
+    description="Intelligent web crawler with native embedding strategy for semantic link selection and DeepSeek reasoning",
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -325,14 +338,16 @@ async def root():
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
-        "version": "2.2.0",
+        "version": "3.0.0",
         "adaptive_available": ADAPTIVE_AVAILABLE,
+        "llmconfig_available": LLMCONFIG_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "openrouter_embeddings": openrouter_configured,
         "features": [
-            "AdaptiveCrawler with BM25 statistical scoring",
-            "Custom OpenRouter embeddings for semantic re-ranking",
-            "Intelligent subpage discovery",
+            "Native EMBEDDING strategy for semantic link selection",
+            "OpenRouter embeddings (qwen3-embedding-8b) for crawling",
+            "Semantic re-ranking of crawled pages",
+            "Increased link exploration (top_k=15)",
             "Automatic confidence-based stopping",
             "DeepSeek-reasoner for answer generation"
         ]
@@ -350,8 +365,9 @@ async def adaptive_crawl(request: CrawlRequest):
     """
     Perform adaptive crawling and return a direct answer.
 
-    - Uses AdaptiveCrawler with BM25 for reliable crawling
-    - OpenRouter embeddings for semantic re-ranking (if API key provided)
+    - Uses AdaptiveCrawler with EMBEDDING strategy for semantic link selection
+    - OpenRouter embeddings (qwen3-embedding-8b) for crawling and re-ranking
+    - Increased link exploration (top_k=15) to discover more relevant content
     - DeepSeek-reasoner generates comprehensive answer
     """
 
@@ -398,7 +414,8 @@ async def adaptive_crawl(request: CrawlRequest):
                 request=request,
                 deepseek_api_key=deepseek_api_key,
                 embedding_client=embedding_client,
-                domain=domain
+                domain=domain,
+                openrouter_api_key=openrouter_api_key
             )
         elif DEEP_CRAWL_AVAILABLE:
             return await run_fallback_deep_crawl(
@@ -426,19 +443,43 @@ async def run_adaptive_crawl(
     request: CrawlRequest,
     deepseek_api_key: str,
     embedding_client: Optional[OpenRouterEmbeddings],
-    domain: str
+    domain: str,
+    openrouter_api_key: Optional[str] = None
 ) -> CrawlResponse:
-    """Run crawl using AdaptiveCrawler with BM25, then re-rank with embeddings."""
+    """Run crawl using AdaptiveCrawler with EMBEDDING strategy for semantic link selection."""
 
-    # Use statistical strategy (BM25) for reliable crawling
-    print("Using BM25 STATISTICAL strategy for crawling", flush=True)
-    config = AdaptiveConfig(
-        strategy="statistical",
-        confidence_threshold=request.confidence_threshold,
-        max_pages=request.max_pages,
-        top_k_links=5,
-        min_gain_threshold=0.05
-    )
+    # Determine which strategy to use based on available config
+    openrouter_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+
+    if LLMCONFIG_AVAILABLE and openrouter_key and request.use_embeddings:
+        # Option 1: Use native EMBEDDING strategy with OpenRouter
+        print("Using EMBEDDING strategy for semantic link selection", flush=True)
+        print(f"Embedding model: openrouter/{request.embedding_model}", flush=True)
+
+        embedding_llm_config = LLMConfig(
+            provider=f"openrouter/{request.embedding_model}",
+            api_token=openrouter_key
+        )
+
+        config = AdaptiveConfig(
+            strategy="embedding",
+            embedding_llm_config=embedding_llm_config,
+            confidence_threshold=request.confidence_threshold,
+            max_pages=request.max_pages,
+            top_k_links=15,  # Option 2: Increased from 5 to explore more links
+            min_gain_threshold=0.01,  # Option 2: Lowered to avoid early stopping
+            n_query_variations=5  # Generate query variations for better matching
+        )
+    else:
+        # Fallback to statistical strategy if embedding not available
+        print("Using STATISTICAL (BM25) strategy (embedding not available)", flush=True)
+        config = AdaptiveConfig(
+            strategy="statistical",
+            confidence_threshold=request.confidence_threshold,
+            max_pages=request.max_pages,
+            top_k_links=15,  # Option 2: Increased from 5
+            min_gain_threshold=0.01  # Option 2: Lowered
+        )
 
     browser_config = BrowserConfig(
         headless=True,
@@ -461,8 +502,9 @@ async def run_adaptive_crawl(
 
         print(f"Crawl complete: {pages_crawled} pages, {confidence:.0%} confidence", flush=True)
 
-        # Print stats
-        adaptive.print_stats()
+        # Print stats (if method exists)
+        if hasattr(adaptive, 'print_stats'):
+            adaptive.print_stats()
 
         if pages_crawled == 0:
             return CrawlResponse(
@@ -475,10 +517,11 @@ async def run_adaptive_crawl(
                 embedding_used=False
             )
 
-        # Get relevant content from BM25
+        # Get relevant content from knowledge base
         relevant_pages = adaptive.get_relevant_content(top_k=20)  # Get more for re-ranking
 
-        print(f"\nBM25 top pages:", flush=True)
+        strategy_name = "Embedding" if (LLMCONFIG_AVAILABLE and openrouter_key and request.use_embeddings) else "BM25"
+        print(f"\n{strategy_name} top pages:", flush=True)
         for i, page in enumerate(relevant_pages[:5], 1):
             print(f"  {i}. {page['score']:.0%} - {page['url']}", flush=True)
 
@@ -527,16 +570,26 @@ async def run_adaptive_crawl(
             api_key=deepseek_api_key
         )
 
-        # Prepare sources
+        # Prepare sources with deduplication
         sources = []
+        seen_urls = set()
         for page in relevant_pages[:10]:
+            url = page.get('url', 'unknown')
+            # Skip duplicate URLs
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
             source_info = {
-                "url": page.get('url', 'unknown'),
+                "url": url,
                 "relevance": round(page.get('score', 0), 3)
             }
             if embedding_used and 'embedding_score' in page:
                 source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
             sources.append(source_info)
+
+        # Determine which strategy was actually used for the message
+        crawl_strategy = "embedding" if (LLMCONFIG_AVAILABLE and openrouter_key and request.use_embeddings) else "statistical"
 
         return CrawlResponse(
             success=True,
@@ -544,9 +597,9 @@ async def run_adaptive_crawl(
             confidence=round(confidence, 3),
             pages_crawled=pages_crawled,
             sources=sources,
-            message=f"Adaptive crawl complete: {pages_crawled} pages, {confidence:.0%} confidence" +
+            message=f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence:.0%} confidence" +
                     (" (with semantic re-ranking)" if embedding_used else ""),
-            embedding_used=embedding_used
+            embedding_used=embedding_used or (crawl_strategy == "embedding")
         )
 
 
@@ -694,11 +747,18 @@ async def run_fallback_deep_crawl(
             api_key=deepseek_api_key
         )
 
-        # Prepare sources
+        # Prepare sources with deduplication
         sources = []
+        seen_urls = set()
         for page in pages_for_ranking[:10]:
+            url = page.get('url', 'unknown')
+            # Skip duplicate URLs
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
             source_info = {
-                "url": page.get('url', 'unknown'),
+                "url": url,
                 "relevance": round(page.get('score', 0), 3)
             }
             if embedding_used and 'embedding_score' in page:
