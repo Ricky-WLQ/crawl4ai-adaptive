@@ -45,6 +45,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Run crawl4ai setup to install browsers
 RUN crawl4ai-setup
 
+# Pre-download sentence-transformers model for EMBEDDING strategy
+# This avoids delay on first request (model is ~90MB)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
 # Copy application code
 COPY . .
 
