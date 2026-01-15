@@ -1,9 +1,4 @@
 {
-  "build": {
-    "docker": {
-      "useLayerCaching": true
-    }
-  },
-  "port": 11235,
-  "health": "/health"
+  "build_type": "dockerfile",
+  "dockerfile": "Dockerfile"
 }
