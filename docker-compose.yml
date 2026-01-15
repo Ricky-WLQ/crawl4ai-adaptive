@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  crawl4ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    image: crawl4ai:5.0.0
+    container_name: crawl4ai
+    
+    # ============================================================================
+    # PORT MAPPING
+    # ============================================================================
+    ports:
+      - "8080:8080"
+    
+    # ============================================================================
+    # ENVIRONMENT VARIABLES
+    # ============================================================================
+    environment:
+      # API Keys (use .env file for secrets)
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - CRAWL_API_KEY=${CRAWL_API_KEY}
+      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-false}
+      
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/app/logs/crawl4ai.log
+      - PORT=8080
+      
+      # Crawler configuration (adjust for your deployment)
+      - MAX_PAGES=${MAX_PAGES:-100}
+      - MAX_DEPTH=${MAX_DEPTH:-3}
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-60}
+      - MEMORY_THRESHOLD_MB=${MEMORY_THRESHOLD_MB:-500}
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-3}
+      
+      # CORS
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    
+    # ============================================================================
+    # VOLUMES
+    # ============================================================================
+    volumes:
+      - crawl4ai-logs:/app/logs
+      - crawl4ai-cache:/app/.cache
+      - crawl4ai-browsers:/app/.browsers
+    
+    # ============================================================================
+    # SHARED MEMORY (Required for Chromium)
+    # ============================================================================
+    shm_size: 2gb
+    
+    # ============================================================================
+    # RESOURCE LIMITS
+    # ============================================================================
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8g
+        reservations:
+          cpus: '2'
+          memory: 4g
+    
+    # ============================================================================
+    # RESTART POLICY
+    # ============================================================================
+    restart: unless-stopped
+    
+    # ============================================================================
+    # HEALTH CHECK
+    # ============================================================================
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    
+    # ============================================================================
+    # LOGGING
+    # ============================================================================
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================================================================
+# NAMED VOLUMES
+# ============================================================================
+volumes:
+  crawl4ai-logs:
+    driver: local
+  crawl4ai-cache:
+    driver: local
+  crawl4ai-browsers:
+    driver: local
