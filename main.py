@@ -16,12 +16,13 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.6.1 (FIXED - All Issues Resolved)
+Version: 3.6.2 (FINAL - All Issues Fixed including asyncio import)
 """
 
 import os
 import sys
 import time
+import asyncio  # ✅ CRITICAL FIX: Added asyncio import
 import numpy as np
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -96,7 +97,7 @@ class OpenRouterEmbeddings:
                     if response.status_code == 429:  # Rate limited
                         wait_time = 2 ** attempt  # Exponential backoff
                         print(f"Rate limited. Waiting {wait_time}s before retry...", flush=True)
-                        await asyncio.sleep(wait_time)
+                        await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
                         continue
 
                     if response.status_code != 200:
@@ -123,7 +124,7 @@ class OpenRouterEmbeddings:
                     raise
                 wait_time = 2 ** attempt
                 print(f"Timeout. Waiting {wait_time}s before retry...", flush=True)
-                await asyncio.sleep(wait_time)
+                await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
                 continue
 
         return []
@@ -231,7 +232,7 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.6.1 (FIXED) Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.6.2 (FINAL) Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
@@ -253,8 +254,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning - v3.6.1 FIXED",
-    version="3.6.1",
+    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning - v3.6.2 FINAL",
+    version="3.6.2",
     lifespan=lifespan
 )
 
@@ -331,7 +332,7 @@ Based on the above content, provide a detailed and accurate answer to the query.
                 if response.status_code == 429:  # Rate limited
                     wait_time = 2 ** attempt
                     print(f"DeepSeek rate limited. Waiting {wait_time}s...", flush=True)
-                    await asyncio.sleep(wait_time)
+                    await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
                     continue
 
                 if response.status_code != 200:
@@ -350,7 +351,7 @@ Based on the above content, provide a detailed and accurate answer to the query.
                 raise HTTPException(status_code=504, detail="DeepSeek API timeout")
             wait_time = 2 ** attempt
             print(f"DeepSeek timeout. Retrying in {wait_time}s...", flush=True)
-            await asyncio.sleep(wait_time)
+            await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
 
     raise HTTPException(status_code=500, detail="Failed to get response from DeepSeek after retries")
 
@@ -415,8 +416,9 @@ async def root():
     """Service status endpoint."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
-        "message": "Crawl4AI Adaptive Crawler v3.6.1 (FIXED) is running!",
-        "version": "3.6.1",
+        "message": "Crawl4AI Adaptive Crawler v3.6.2 (FINAL) is running!",
+        "version": "3.6.2",
+        "status": "✅ Ready",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "openrouter_reranking": openrouter_configured,
@@ -431,7 +433,8 @@ async def root():
             "✓ FIX 1: Added result extraction fallback",
             "✓ FIX 2: Added retry logic for API calls",
             "✓ FIX 3: Added error handling for None results",
-            "✓ FIX 4: Removed unused imports"
+            "✓ FIX 4: Removed unused imports",
+            "✓ FIX 5: ✅ Added asyncio import"
         ],
         "features": [
             "LOCAL multilingual embedding strategy",
@@ -866,7 +869,6 @@ async def run_fallback_deep_crawl(
 
 
 if __name__ == "__main__":
-    import asyncio
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     print(f"Starting server on port {port}...", flush=True)
