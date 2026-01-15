@@ -34,9 +34,10 @@ playwright>=1.40.0
 sentence-transformers>=2.2.0
 
 # Deep learning framework for embeddings (CPU-only version)
-# FIX: Specify CPU version to avoid GPU bloat (~2GB extra)
+# FIX: Updated from torch>=2.0.0,<2.1.0 to torch>=2.1.0
+# PyTorch 2.1+ required by sentence-transformers (torch.compiler attribute)
 # CPU version suitable for servers (GPU optional for acceleration)
-torch>=2.0.0,<2.1.0
+torch>=2.1.0,<3.0.0
 
 # Transformers for sentence-transformers models
 transformers>=4.30.0,<5.0.0
@@ -53,8 +54,8 @@ uvicorn[standard]>=0.24.0
 # ============================================================
 # SOLUTION 3: Async HTTP client for API calls (DeepSeek, OpenRouter)
 # ============================================================
-# FIX: Removed version constraint to avoid conflict with crawl4ai
-# crawl4ai requires httpx>=0.27.2, so we let it handle the version
+# FIX: Updated from httpx<0.26.0 to httpx>=0.27.2
+# crawl4ai requires httpx>=0.27.2, this resolves dependency conflict
 # Used for:
 #   - DeepSeek API (answer generation)
 #   - OpenRouter API (SOLUTION 3: re-ranking with embeddings)
@@ -144,9 +145,10 @@ python-dotenv>=1.0.0
 #   - Only Chromium installed (~200MB)
 #   - Saves ~400MB vs Firefox+WebKit (not needed)
 #
-# torch>=2.0.0,<2.1.0
-#   - Required for sentence-transformers
-#   - Pinned to <2.1.0 to avoid unexpected breaking changes
+# torch>=2.1.0,<3.0.0
+#   - FIX: UPDATED from torch>=2.0.0,<2.1.0
+#   - Required for sentence-transformers (needs torch.compiler)
+#   - PyTorch 2.1 introduces torch.compiler optimization feature
 #   - CPU-only version (sufficient for inference)
 #   - GPU version available: pip install torch --index-url https://download.pytorch.org/whl/cu118
 #
@@ -159,6 +161,7 @@ python-dotenv>=1.0.0
 #   - SOLUTION 2: Updated embedding library
 #   - Supports paraphrase-multilingual-mpnet-base-v2
 #   - Better Chinese language support
+#   - Requires torch>=2.1.0 (torch.compiler attribute)
 #
 # fastapi>=0.104.1
 #   - Modern async Python web framework
@@ -171,11 +174,12 @@ python-dotenv>=1.0.0
 #   - No upper bound (stable releases)
 #
 # httpx>=0.27.2
-#   - FIX: Updated from <0.26.0 to match crawl4ai requirement
+#   - FIX: UPDATED from httpx>=0.25.1,<0.26.0
 #   - Modern async HTTP client
 #   - Replaces requests for async operations
 #   - Used for DeepSeek & OpenRouter API calls
 #   - Built-in retry logic (we implemented exponential backoff)
+#   - Matches crawl4ai requirement (>=0.27.2)
 #
 # pydantic>=2.5.0
 #   - Data validation and serialization
@@ -228,17 +232,17 @@ python-dotenv>=1.0.0
 #   - Python packages: ~2.0GB
 #   - Playwright (Chromium only): ~200MB
 #   - Sentence-transformers model: ~500MB
-#   - Torch (CPU): ~700MB
+#   - Torch (CPU): ~800MB (slightly larger with 2.1+)
 #   - Transformers: ~300MB
 #   - Other dependencies: ~200MB
 #   ─────────────────────────────
-#   Total: ~4.4GB
+#   Total: ~4.5GB
 #
 # Previous Version: ~5.9GB
-# Size Reduction: ~1.5GB (25% smaller)
+# Size Reduction: ~1.4GB (24% smaller)
 #
 # Runtime Buffer: ~500MB (for runtime caches)
-# Total Recommended: ~4.9GB
+# Total Recommended: ~5.0GB
 #
 # Note: On Zeabur, typically included in container allocation
 #
@@ -252,6 +256,9 @@ python-dotenv>=1.0.0
 #
 # torch (CPU):        ✅ Recommended (no GPU needed)
 # torch (GPU CUDA):   ⚠️  Requires NVIDIA GPU + CUDA toolkit
+#
+# torch 2.1.0+:       ✅ Required by sentence-transformers (torch.compiler)
+# torch 2.0.x:        ❌ Too old (missing torch.compiler attribute)
 #
 # Playwright:         ✅ Chromium only (sufficient)
 #                     ⚠️  Firefox/WebKit not installed (saves space)
@@ -275,12 +282,12 @@ python-dotenv>=1.0.0
 #
 # SOLUTION 2 (Better Embedding Model)
 #   → sentence-transformers>=2.2.0 (supports mpnet-base-v2)
-#   → torch>=2.0.0 (inference engine)
+#   → torch>=2.1.0 (FIX: updated from 2.0.0)
 #   → transformers>=4.30.0 (model loading)
 #   → numpy>=1.24.3 (vector operations)
 #
 # SOLUTION 3 (Better Re-ranking Weights)
-#   → httpx>=0.27.2 (OpenRouter API calls - FIX: updated version)
+#   → httpx>=0.27.2 (FIX: updated from 0.25.1)
 #   → numpy>=1.24.3 (cosine similarity calculations)
 #   → pydantic>=2.5.0 (response validation)
 #
@@ -295,6 +302,22 @@ python-dotenv>=1.0.0
 # SOLUTION 6 (Proper Content Extraction)
 #   → crawl4ai>=0.7.0 (improved markdown extraction)
 #   → playwright>=1.40.0 (better .asp file parsing)
+#
+# ============================================================
+# CRITICAL FIXES APPLIED
+# ============================================================
+#
+# FIX 1: PyTorch Version Conflict
+#   - OLD: torch>=2.0.0,<2.1.0
+#   - NEW: torch>=2.1.0,<3.0.0
+#   - REASON: sentence-transformers requires torch.compiler (PyTorch 2.1+)
+#   - ERROR: "module 'torch' has no attribute 'compiler'"
+#
+# FIX 2: httpx Version Conflict
+#   - OLD: httpx>=0.25.1,<0.26.0
+#   - NEW: httpx>=0.27.2
+#   - REASON: crawl4ai requires httpx>=0.27.2
+#   - ERROR: "Conflicting dependencies"
 #
 # ============================================================
 # SECURITY & BEST PRACTICES
@@ -326,19 +349,21 @@ python-dotenv>=1.0.0
 # TROUBLESHOOTING
 # ============================================================
 #
+# ERROR: "module 'torch' has no attribute 'compiler'"
+#   → PyTorch version too old
+#   → Solution: Updated torch to >=2.1.0
+#   → Clear cache: pip cache purge
+#   → Reinstall: pip install -r requirements.txt --force-reinstall
+#
 # ERROR: "Conflicting dependencies"
-#   → This was caused by httpx version conflict
-#   → Solution: Updated httpx to >=0.27.2 (compatible with crawl4ai)
+#   → httpx version conflict with crawl4ai
+#   → Solution: Updated httpx to >=0.27.2
 #   → Clear cache: pip cache purge
 #   → Reinstall: pip install -r requirements.txt --force-reinstall
 #
 # ERROR: "No module named 'asyncio'"
 #   → asyncio is built-in with Python 3.11+
 #   → Should not see this error (report if you do)
-#
-# ERROR: "torch version X is not compatible"
-#   → Clear pip cache: pip cache purge
-#   → Reinstall: pip install -r requirements.txt --force-reinstall
 #
 # ERROR: "playwright browsers not found"
 #   → Run: python -m playwright install chromium
