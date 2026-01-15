@@ -1,31 +1,40 @@
 """
-Crawl4AI Hybrid BFS + Semantic Crawler with DeepSeek Reasoner
+Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
-VERSION 3.8.0 - HYBRID BFS DEEP CRAWL (Context7 Verified)
+VERSION 3.7.1 - SPA/JavaScript FIX + EXTRACTION FIXES
 
-CRITICAL FIX: Uses BFS (Breadth-First Search) for GUARANTEED DEPTH CRAWLING
-- BFS ensures ALL links at each level are visited before going deeper
-- max_depth=3 guarantees reaching content pages like go.asp?d=lei-17-2009cn
-- Semantic ranking applied AFTER crawling for relevance sorting
+ROOT CAUSE FIXES (identified via Context7 documentation):
+1. SPAFriendlyCrawler wrapper - AdaptiveCrawler doesn't accept CrawlerRunConfig,
+   so SPA/JavaScript sites weren't rendering. The wrapper intercepts arun() calls
+   and automatically injects CrawlerRunConfig with wait_for, process_iframes, etc.
+2. Embedding model verification at startup - detects model loading failures early
+3. Verbose logging for debugging - helps trace content extraction issues
+4. FIXED: CrawlResult.markdown extraction - was looking for .content instead of .markdown.raw_markdown
+5. FIXED: Format string bugs - .0% formatter with manual multiplication
+6. FIXED: Early validation of extracted content - fail fast if KB extraction fails
 
-WHY BFS OVER DFS/ADAPTIVE:
-- BFS: Systematic level-by-level exploration (finds ALL sibling links)
-- DFS: Goes deep on first link only (may miss sibling content)
-- Adaptive: Semantic selection may skip important links with unfamiliar text
+EMBEDDING STRATEGY (Semantic Crawling - NO API NEEDED!):
+- Uses LOCAL sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+- Supports 50+ languages including Chinese, English, and more
+- AGGRESSIVE EXPLORATION: confidence_threshold=0.05, min_relative_improvement=0.01
+- Disables early stopping to ensure thorough crawling
 
-ARCHITECTURE:
-1. BFSDeepCrawlStrategy (max_depth=3) - Crawl ALL pages systematically
-2. SPA-friendly settings - JavaScript rendering for .asp sites
-3. Local embedding scoring - Rank by semantic relevance
-4. OpenRouter re-ranking (optional) - Additional semantic refinement
-5. DeepSeek-reasoner - Generate comprehensive answers
+SPA/JavaScript Support (NEW in v3.7.0):
+- wait_for="css:body" ensures JavaScript content renders before extraction
+- process_iframes=True includes iframe content
+- delay_before_return_html=2.0s extra delay for JS execution
+- page_timeout=60000ms longer timeout for slow sites
 
-EMBEDDING STRATEGY:
-- LOCAL: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
-- Supports 50+ languages (Chinese, English, Portuguese, etc.)
-- NO API calls needed during crawling
+FALLBACK (if use_embeddings=false):
+- Uses BM25 statistical strategy (keyword-based)
 
-Version: 3.8.0 (HYBRID BFS DEEP CRAWL - Context7 Verified)
+RE-RANKING (optional, requires OPENROUTER_API_KEY):
+- OpenRouter embeddings (qwen3-embedding-8b) for semantic re-ranking
+
+ANSWER GENERATION (requires DEEPSEEK_API_KEY):
+- DeepSeek-reasoner for comprehensive answers
+
+Version: 3.7.1 (SPA FIX + EXTRACTION FIXES - Context7 Verified)
 """
 
 import os
@@ -33,152 +42,189 @@ import sys
 import asyncio
 import numpy as np
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from urllib.parse import urlparse
 import re
-import traceback
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# ============================================================================
 # Core crawl4ai imports
-# ============================================================================
 try:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
     from crawl4ai.async_configs import CacheMode
-    CORE_AVAILABLE = True
     print("Core crawl4ai imported successfully", flush=True)
 except ImportError as e:
-    print(f"CRITICAL: Failed to import core crawl4ai: {e}", flush=True)
+    print(f"Failed to import core crawl4ai: {e}", flush=True)
     sys.exit(1)
 
-# BFS Deep Crawling imports (PRIMARY - for depth control)
-try:
-    from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
-    from crawl4ai.deep_crawling.filters import FilterChain, DomainFilter
-    from crawl4ai.deep_crawling.scorers import KeywordRelevanceScorer
-    BFS_AVAILABLE = True
-    print("BFSDeepCrawlStrategy imported successfully (PRIMARY)", flush=True)
-except ImportError as e:
-    print(f"BFSDeepCrawlStrategy not available: {e}", flush=True)
-    BFS_AVAILABLE = False
 
-# AdaptiveCrawler imports (SECONDARY - for semantic fallback)
-try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
-    ADAPTIVE_AVAILABLE = True
-    print("AdaptiveCrawler imported successfully (SECONDARY)", flush=True)
-except ImportError as e:
-    print(f"AdaptiveCrawler not available: {e}", flush=True)
-    ADAPTIVE_AVAILABLE = False
+# ============================================================================
+# FIX: AsyncWebCrawler Wrapper for SPA/JavaScript Sites
+# ============================================================================
+# ROOT CAUSE: AdaptiveCrawler doesn't accept CrawlerRunConfig, so it can't
+# pass wait_for, process_iframes, or wait_until to handle SPA sites.
+# SOLUTION: Wrap AsyncWebCrawler to automatically inject CrawlerRunConfig
+# with SPA-friendly settings on every arun() call.
+# ============================================================================
 
-# Sentence transformers for local semantic scoring
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-    print("sentence-transformers imported successfully", flush=True)
-except ImportError as e:
-    print(f"sentence-transformers not available: {e}", flush=True)
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+class SPAFriendlyCrawler:
+    """
+    Wrapper around AsyncWebCrawler that automatically adds SPA-friendly settings.
+
+    This solves the issue where AdaptiveCrawler can't pass CrawlerRunConfig
+    because it calls crawler.arun() internally without config parameter.
+
+    Settings applied:
+    - wait_for: Wait for body content to render
+    - process_iframes: Include iframe content
+    - delay_before_return_html: Extra delay for JS to execute
+    - page_timeout: Longer timeout for slow sites
+    """
+
+    def __init__(self, crawler: AsyncWebCrawler, default_config: CrawlerRunConfig = None):
+        self._crawler = crawler
+        self._default_config = default_config or CrawlerRunConfig(
+            # Wait for JavaScript content to render
+            wait_for="css:body",
+            # Include iframe content (important for embedded content)
+            process_iframes=True,
+            # Extra delay for JavaScript execution
+            delay_before_return_html=2.0,
+            # Longer timeout for slow sites
+            page_timeout=60000,
+            # Bypass cache to get fresh content
+            cache_mode=CacheMode.BYPASS,
+            # Be verbose for debugging
+            verbose=True
+        )
+        print(f"SPAFriendlyCrawler initialized with SPA-friendly defaults", flush=True)
+        print(f"  - wait_for: {self._default_config.wait_for}", flush=True)
+        print(f"  - process_iframes: {self._default_config.process_iframes}", flush=True)
+        print(f"  - delay_before_return_html: {self._default_config.delay_before_return_html}s", flush=True)
+
+    async def arun(self, url: str, config: CrawlerRunConfig = None, **kwargs):
+        """
+        Intercept arun() calls and inject SPA-friendly config.
+
+        If AdaptiveCrawler calls arun() without config, we use our default.
+        If a config is provided, we could merge settings (for now we use provided).
+        """
+        # Use provided config or fall back to our SPA-friendly defaults
+        effective_config = config if config is not None else self._default_config
+
+        print(f"SPAFriendlyCrawler.arun() called for: {url[:80]}...", flush=True)
+        print(f"  Using config with wait_for={effective_config.wait_for}", flush=True)
+
+        return await self._crawler.arun(url=url, config=effective_config, **kwargs)
+
+    # Delegate all other methods/attributes to the underlying crawler
+    def __getattr__(self, name):
+        return getattr(self._crawler, name)
+
+    async def __aenter__(self):
+        await self._crawler.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return await self._crawler.__aexit__(exc_type, exc_val, exc_tb)
 
 
 # ============================================================================
-# Global State
+# FIX: Embedding Model Verification at Startup
 # ============================================================================
-EMBEDDING_MODEL = None
+# ROOT CAUSE: The embedding model might fail silently, causing 0 terms extraction.
+# SOLUTION: Verify the model loads and generates embeddings at startup.
+# ============================================================================
+
 EMBEDDING_MODEL_VERIFIED = False
 EMBEDDING_MODEL_ERROR = None
 
-
-# ============================================================================
-# Embedding Model Initialization
-# ============================================================================
-def initialize_embedding_model(model_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2") -> bool:
+def verify_embedding_model(model_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2") -> bool:
     """
-    Initialize and verify the embedding model at startup.
-    This runs once and caches the model for reuse.
-    """
-    global EMBEDDING_MODEL, EMBEDDING_MODEL_VERIFIED, EMBEDDING_MODEL_ERROR
+    Verify that the embedding model can be loaded and generates valid embeddings.
 
-    if not SENTENCE_TRANSFORMERS_AVAILABLE:
-        EMBEDDING_MODEL_ERROR = "sentence-transformers not installed"
-        print(f"Embedding model initialization SKIPPED: {EMBEDDING_MODEL_ERROR}", flush=True)
-        return False
+    This runs at startup to catch model loading issues early.
+    """
+    global EMBEDDING_MODEL_VERIFIED, EMBEDDING_MODEL_ERROR
 
     try:
-        print(f"Initializing embedding model: {model_name}...", flush=True)
+        print(f"Verifying embedding model: {model_name}...", flush=True)
 
-        # Load the model (cached globally)
-        EMBEDDING_MODEL = SentenceTransformer(model_name)
-        print(f"  Model loaded successfully", flush=True)
+        # Try to import sentence-transformers
+        from sentence_transformers import SentenceTransformer
 
-        # Test with sample texts
+        # Load the model
+        model = SentenceTransformer(model_name)
+        print(f"  ✓ Model loaded successfully", flush=True)
+
+        # Test with sample texts (include Chinese for multilingual verification)
         test_texts = [
-            "This is a test sentence.",
-            "澳門法律 刑法 販毒",  # Macau law terms
-            "第17/2009號法律"  # Law number format
+            "This is a test sentence in English.",
+            "这是一个中文测试句子。",  # Chinese test
+            "澳門法律 刑事 販毒"  # Macau law terms
         ]
 
-        embeddings = EMBEDDING_MODEL.encode(test_texts)
-        print(f"  Generated {len(embeddings)} test embeddings", flush=True)
-        print(f"  Embedding dimension: {len(embeddings[0])}", flush=True)
+        # Generate embeddings
+        embeddings = model.encode(test_texts)
+        print(f"  ✓ Generated {len(embeddings)} embeddings", flush=True)
+        print(f"  ✓ Embedding dimension: {len(embeddings[0])}", flush=True)
 
-        # Verify embeddings are valid
-        for i, emb in enumerate(embeddings):
+        # Verify embeddings are not zero vectors
+        import numpy as np
+        for i, (text, emb) in enumerate(zip(test_texts, embeddings)):
             norm = np.linalg.norm(emb)
             if norm < 0.001:
-                raise ValueError(f"Embedding {i} has near-zero norm")
+                raise ValueError(f"Embedding for '{text[:30]}...' has near-zero norm: {norm}")
+            print(f"  ✓ Text {i+1} embedding norm: {norm:.4f}", flush=True)
+
+        # Test similarity between Chinese texts
+        from sklearn.metrics.pairwise import cosine_similarity
+        sim = cosine_similarity([embeddings[1]], [embeddings[2]])[0][0]
+        print(f"  ✓ Chinese text similarity test: {sim:.4f}", flush=True)
 
         EMBEDDING_MODEL_VERIFIED = True
-        print(f"Embedding model verification PASSED", flush=True)
+        print(f"✅ Embedding model verification PASSED", flush=True)
         return True
 
+    except ImportError as e:
+        EMBEDDING_MODEL_ERROR = f"sentence-transformers not installed: {e}"
+        print(f"❌ Embedding model verification FAILED: {EMBEDDING_MODEL_ERROR}", flush=True)
+        return False
     except Exception as e:
         EMBEDDING_MODEL_ERROR = str(e)
-        print(f"Embedding model initialization FAILED: {e}", flush=True)
+        print(f"❌ Embedding model verification FAILED: {EMBEDDING_MODEL_ERROR}", flush=True)
+        import traceback
         traceback.print_exc()
         return False
 
 
-def compute_semantic_scores(query: str, contents: List[str]) -> List[float]:
-    """
-    Compute semantic similarity scores between query and contents using local model.
-    Returns list of scores (0.0 to 1.0).
-    """
-    if not EMBEDDING_MODEL or not EMBEDDING_MODEL_VERIFIED:
-        return [0.5] * len(contents)  # Default score if model not available
+# Adaptive crawler imports
+try:
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
+    ADAPTIVE_AVAILABLE = True
+    print("AdaptiveCrawler imported successfully", flush=True)
+except ImportError as e:
+    print(f"AdaptiveCrawler not available: {e}", flush=True)
+    ADAPTIVE_AVAILABLE = False
 
-    try:
-        # Encode query and contents
-        query_embedding = EMBEDDING_MODEL.encode([query])[0]
-        content_embeddings = EMBEDDING_MODEL.encode(contents)
-
-        # Compute cosine similarities
-        scores = []
-        query_norm = np.linalg.norm(query_embedding)
-
-        for content_emb in content_embeddings:
-            content_norm = np.linalg.norm(content_emb)
-            if query_norm > 0 and content_norm > 0:
-                similarity = np.dot(query_embedding, content_emb) / (query_norm * content_norm)
-                # Normalize to 0-1 range (cosine similarity can be -1 to 1)
-                score = (similarity + 1) / 2
-            else:
-                score = 0.5
-            scores.append(float(score))
-
-        return scores
-
-    except Exception as e:
-        print(f"Semantic scoring error: {e}", flush=True)
-        return [0.5] * len(contents)
+# Fallback: Deep crawling imports (if adaptive not available)
+try:
+    from crawl4ai.deep_crawling import BestFirstCrawlingStrategy
+    from crawl4ai.deep_crawling.filters import FilterChain, DomainFilter
+    from crawl4ai.deep_crawling.scorers import KeywordRelevanceScorer
+    DEEP_CRAWL_AVAILABLE = True
+    print("Deep crawling (fallback) imported successfully", flush=True)
+except ImportError as e:
+    print(f"Deep crawling not available: {e}", flush=True)
+    DEEP_CRAWL_AVAILABLE = False
 
 
 # ============================================================================
-# OpenRouter Embedding Client (Optional Re-ranking)
+# Custom OpenRouter Embedding Client with Retry Logic
 # ============================================================================
+
 class OpenRouterEmbeddings:
     """Custom client for OpenRouter embeddings API with retry logic."""
 
@@ -189,10 +235,11 @@ class OpenRouterEmbeddings:
         self.max_retries = max_retries
 
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Get embeddings for texts from OpenRouter with retry logic."""
+        """Get embeddings for a list of texts from OpenRouter with retry logic."""
         if not texts:
             return []
 
+        total_wait = 0
         for attempt in range(self.max_retries):
             try:
                 async with httpx.AsyncClient(timeout=60.0) as client:
@@ -202,33 +249,46 @@ class OpenRouterEmbeddings:
                             "Authorization": f"Bearer {self.api_key}",
                             "Content-Type": "application/json"
                         },
-                        json={"model": self.model, "input": texts}
+                        json={
+                            "model": self.model,
+                            "input": texts
+                        }
                     )
 
-                    if response.status_code == 429:
+                    if response.status_code == 429:  # Rate limited
                         wait_time = 2 ** attempt
-                        print(f"Rate limited. Waiting {wait_time}s...", flush=True)
+                        total_wait += wait_time
+                        print(f"Rate limited. Waiting {wait_time}s before retry (total wait: {total_wait}s)...", flush=True)
                         await asyncio.sleep(wait_time)
                         continue
 
                     if response.status_code != 200:
-                        print(f"OpenRouter error: {response.status_code}", flush=True)
+                        print(f"OpenRouter embedding error: {response.status_code} - {response.text}", flush=True)
                         if attempt == self.max_retries - 1:
-                            return []
+                            raise HTTPException(
+                                status_code=response.status_code,
+                                detail=f"OpenRouter embedding error: {response.text}"
+                            )
                         continue
 
                     result = response.json()
+                    # Extract embeddings in order
                     embeddings = [None] * len(texts)
                     for item in result.get("data", []):
                         idx = item.get("index", 0)
                         embeddings[idx] = item.get("embedding", [])
+
                     return embeddings
 
-            except Exception as e:
+            except httpx.TimeoutException:
                 if attempt == self.max_retries - 1:
-                    print(f"OpenRouter failed after {self.max_retries} attempts: {e}", flush=True)
-                    return []
-                await asyncio.sleep(2 ** attempt)
+                    print(f"Timeout after {self.max_retries} attempts", flush=True)
+                    raise
+                wait_time = 2 ** attempt
+                total_wait += wait_time
+                print(f"Timeout. Waiting {wait_time}s before retry (total wait: {total_wait}s)...", flush=True)
+                await asyncio.sleep(wait_time)
+                continue
 
         return []
 
@@ -238,206 +298,198 @@ class OpenRouterEmbeddings:
         return embeddings[0] if embeddings else []
 
 
-def cosine_similarity_vectors(vec1: List[float], vec2: List[float]) -> float:
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     """Calculate cosine similarity between two vectors."""
     if not vec1 or not vec2:
         return 0.0
+
     try:
         a = np.array(vec1)
         b = np.array(vec2)
+
         dot_product = np.dot(a, b)
         norm_a = np.linalg.norm(a)
         norm_b = np.linalg.norm(b)
+
         if norm_a == 0 or norm_b == 0:
             return 0.0
+
         return float(dot_product / (norm_a * norm_b))
-    except Exception:
+    except Exception as e:
+        print(f"Error calculating cosine similarity: {e}", flush=True)
         return 0.0
 
 
-async def rerank_with_openrouter(
+async def rerank_by_embeddings(
     query: str,
-    pages: List[Dict],
+    pages: List[dict],
     embedding_client: OpenRouterEmbeddings,
-    top_k: int = 15
-) -> List[Dict]:
-    """Re-rank pages using OpenRouter embeddings (75% semantic, 25% original)."""
+    top_k: int = 10
+) -> List[dict]:
+    """Re-rank pages by semantic similarity to query using embeddings.
+    
+    SOLUTION 3: Better weighting - trust semantic embeddings more (75% vs 25% BM25)
+    """
+
     if not pages:
         return []
 
-    print(f"Re-ranking {len(pages)} pages with OpenRouter...", flush=True)
+    print(f"Re-ranking {len(pages)} pages using OpenRouter embeddings...", flush=True)
 
-    try:
-        query_embedding = await embedding_client.get_embedding(query)
-        if not query_embedding:
-            print("Failed to get query embedding", flush=True)
-            return pages[:top_k]
+    # Get query embedding
+    query_embedding = await embedding_client.get_embedding(query)
 
-        page_texts = [p.get('content', '')[:4000] for p in pages]
-        page_embeddings = await embedding_client.get_embeddings(page_texts)
-
-        scored_pages = []
-        for i, page in enumerate(pages):
-            if i < len(page_embeddings) and page_embeddings[i]:
-                similarity = cosine_similarity_vectors(query_embedding, page_embeddings[i])
-            else:
-                similarity = 0.0
-
-            original_score = page.get('score', 0.5)
-            combined_score = (0.75 * similarity) + (0.25 * original_score)
-
-            scored_pages.append({
-                **page,
-                'embedding_score': round(similarity, 4),
-                'original_score': original_score,
-                'score': round(combined_score, 4)
-            })
-
-        scored_pages.sort(key=lambda x: x['score'], reverse=True)
-        print(f"Re-ranking complete. Top scores: {[p['score'] for p in scored_pages[:5]]}", flush=True)
-        return scored_pages[:top_k]
-
-    except Exception as e:
-        print(f"OpenRouter re-ranking failed: {e}", flush=True)
+    if not query_embedding:
+        print("Failed to get query embedding, returning original order", flush=True)
         return pages[:top_k]
 
+    # Get embeddings for page content (use first 4000 chars for better coverage)
+    page_texts = []
+    for page in pages:
+        content = page.get('content', '')
+        # Use more content for better semantic matching (especially for legal docs)
+        text = content[:4000] if content else ''
+        page_texts.append(text)
+
+    # Batch embed all pages
+    try:
+        page_embeddings = await embedding_client.get_embeddings(page_texts)
+    except Exception as e:
+        print(f"Failed to get page embeddings: {e}, returning original order", flush=True)
+        return pages[:top_k]
+
+    # Calculate similarity scores
+    scored_pages = []
+    for i, page in enumerate(pages):
+        if i < len(page_embeddings) and page_embeddings[i]:
+            similarity = cosine_similarity(query_embedding, page_embeddings[i])
+        else:
+            similarity = 0.0
+
+        # SOLUTION 3: Better weighting - trust semantic similarity more
+        original_score = page.get('score', 0.5)
+        # Weighted combination: 75% embedding, 25% BM25 (instead of 60/40)
+        combined_score = (0.75 * similarity) + (0.25 * original_score)
+
+        scored_pages.append({
+            **page,
+            'embedding_score': round(similarity, 4),
+            'original_score': original_score,
+            'score': round(combined_score, 4)
+        })
+
+    # Sort by combined score
+    scored_pages.sort(key=lambda x: x['score'], reverse=True)
+
+    print(f"Re-ranking complete. Top scores: {[p['score'] for p in scored_pages[:5]]}", flush=True)
+
+    return scored_pages[:top_k]
+
 
 # ============================================================================
-# Helper Functions
+# Helper: Language Detection
 # ============================================================================
-def detect_query_languages(query: str) -> Dict[str, Any]:
-    """Detect languages in query."""
+
+def detect_query_languages(query: str) -> dict:
+    """Detect languages in query (Chinese, English, etc.)."""
     has_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
     has_english = bool(re.search(r'[a-zA-Z]', query))
+    
     languages = []
     if has_chinese:
         languages.append("Chinese")
     if has_english:
         languages.append("English")
+    
     return {
         "has_chinese": has_chinese,
         "has_english": has_english,
-        "languages": languages or ["Unknown"]
+        "languages": languages,
+        "is_multilingual": len(languages) > 1
     }
 
 
-def extract_keywords(query: str) -> List[str]:
-    """
-    Extract keywords from query, handling both English and Chinese.
-
-    For Chinese: Extracts 2-4 character segments (common word lengths)
-    For English: Splits by whitespace and filters stop words
-    """
-    # Extended stop words for questions
-    stop_words = {
-        # English
-        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-        'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-        'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-        'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
-        'what', 'which', 'who', 'how', 'when', 'where', 'why', 'i', 'you',
-        'show', 'get', 'find', 'give', 'me', 'my', 'your', 'want', 'need',
-        'please', 'tell', 'about', 'know', 'information',
-        # Chinese stop words and question particles
-        '我', '是', '在', '会', '被', '了', '吗', '嘛', '的', '和', '与',
-        '什么', '什麼', '怎么', '怎麼', '如何', '哪里', '哪裡', '为什么', '為什麼',
-        '请', '請', '告诉', '告訴', '关于', '關於', '有关', '有關',
-        '能', '可以', '想', '要', '给', '給', '这', '這', '那', '个', '個'
-    }
-
-    keywords = []
-
-    # Extract English words (split by whitespace)
-    english_words = re.findall(r'[a-zA-Z]+', query)
-    for word in english_words:
-        if len(word) > 2 and word.lower() not in stop_words:
-            keywords.append(word.lower())
-
-    # Extract Chinese text segments
-    chinese_text = ''.join(re.findall(r'[\u4e00-\u9fff]+', query))
-
-    if chinese_text:
-        # Extract overlapping 2-char, 3-char, and 4-char segments
-        # This captures common Chinese word lengths without needing a segmenter
-        for length in [2, 3, 4]:
-            for i in range(len(chinese_text) - length + 1):
-                segment = chinese_text[i:i + length]
-                # Skip if it's a stop word or contains only stop characters
-                if segment not in stop_words and not all(c in '的是在了吗嘛什么麼' for c in segment):
-                    keywords.append(segment)
-
-        # Also add important single characters that might be meaningful
-        important_chars = ['法', '律', '罪', '刑', '罰', '毒', '販', '澳', '門']
-        for char in chinese_text:
-            if char in important_chars:
-                keywords.append(char)
-
-    # Remove duplicates while preserving some order
-    seen = set()
-    unique_keywords = []
-    for kw in keywords:
-        if kw not in seen:
-            seen.add(kw)
-            unique_keywords.append(kw)
-
-    return unique_keywords
-
-
-def extract_content_from_result(result) -> str:
-    """Extract text content from a CrawlResult object."""
-    content = ""
-
-    # Try markdown extraction first
-    if hasattr(result, 'markdown') and result.markdown:
-        md = result.markdown
-        if hasattr(md, 'fit_markdown') and md.fit_markdown:
-            content = str(md.fit_markdown)
-        elif hasattr(md, 'raw_markdown') and md.raw_markdown:
-            content = str(md.raw_markdown)
-
-    # Fallback to extracted_content
-    if not content and hasattr(result, 'extracted_content') and result.extracted_content:
-        content = str(result.extracted_content)
-
-    # Final fallback to html
-    if not content and hasattr(result, 'html') and result.html:
-        # Strip HTML tags for basic text
-        content = re.sub(r'<[^>]+>', ' ', str(result.html))
-        content = re.sub(r'\s+', ' ', content).strip()
-
-    return content.strip()
-
-
-def format_context_for_llm(pages: List[Dict], max_chars: int = 30000) -> str:
-    """Format pages into context string for LLM."""
-    context_parts = []
-    total_chars = 0
-
-    for i, page in enumerate(pages, 1):
-        url = page.get('url', 'unknown')
-        score = page.get('score', 0)
-        content = page.get('content', '')
-
-        if not content or len(content) < 50:
-            continue
-
-        page_text = content[:6000] if len(content) > 6000 else content
-        score_pct = int(score * 100)
-
-        entry = f"\n=== Page {i} (Relevance: {score_pct}%): {url} ===\n{page_text}\n"
-
-        if total_chars + len(entry) > max_chars:
-            break
-
-        context_parts.append(entry)
-        total_chars += len(entry)
-
-    return "\n".join(context_parts)
-
-
 # ============================================================================
-# DeepSeek API
+# FastAPI Application
 # ============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler."""
+    openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
+    print("=" * 60, flush=True)
+    print("Crawl4AI Adaptive Crawler v3.7.1 (SPA + EXTRACTION FIXES) Starting...", flush=True)
+    print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
+    print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
+    print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
+    print("=" * 60, flush=True)
+
+    # FIX: Verify embedding model at startup
+    print("STARTUP VERIFICATION:", flush=True)
+    embedding_ok = verify_embedding_model()
+    if not embedding_ok:
+        print(f"⚠️  WARNING: Embedding model verification failed!", flush=True)
+        print(f"   Error: {EMBEDDING_MODEL_ERROR}", flush=True)
+        print(f"   The embedding strategy may not work correctly.", flush=True)
+    print("=" * 60, flush=True)
+
+    print("FIXES APPLIED (v3.7.1):", flush=True)
+    print("  ✓ FIX 1: SPAFriendlyCrawler wrapper for JavaScript sites", flush=True)
+    print("    - Automatically injects CrawlerRunConfig to AdaptiveCrawler", flush=True)
+    print("    - wait_for='css:body' ensures content renders", flush=True)
+    print("    - process_iframes=True includes embedded content", flush=True)
+    print("    - delay_before_return_html=2.0s for JS execution", flush=True)
+    print("  ✓ FIX 2: Embedding model verification at startup", flush=True)
+    print("  ✓ FIX 3: Verbose logging for debugging", flush=True)
+    print("  ✓ FIX 4: CrawlResult.markdown extraction (was looking for .content)", flush=True)
+    print("  ✓ FIX 5: Format string bugs (:.0% with manual multiplication)", flush=True)
+    print("  ✓ FIX 6: Early validation of extracted content (fail fast)", flush=True)
+    print("=" * 60, flush=True)
+
+    print("EMBEDDING Strategy (LOCAL MULTILINGUAL - No API needed!):", flush=True)
+    print("  ✓ Model: paraphrase-multilingual-mpnet-base-v2 (50+ languages)", flush=True)
+    print(f"  ✓ Model Verified: {'YES' if EMBEDDING_MODEL_VERIFIED else 'NO'}", flush=True)
+    print("  ✓ AGGRESSIVE exploration (confidence=0.05, min_improvement=0.01)", flush=True)
+    print("  ✓ Query variations=20 for comprehensive coverage", flush=True)
+    print("  ✓ max_pages=50, top_k_links=25 (deeper crawling)", flush=True)
+    if openrouter_configured:
+        print("  ✓ Re-ranking 75% semantic + 25% BM25", flush=True)
+        print("  ✓ Re-ranking: OpenRouter qwen3-embedding-8b with retry logic", flush=True)
+    print("  ✓ Answer Generation: DeepSeek-reasoner", flush=True)
+    print("=" * 60, flush=True)
+    yield
+    print("Shutting down...", flush=True)
+
+
+app = FastAPI(
+    title="Crawl4AI Adaptive Crawler",
+    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + SPA/JavaScript support + OpenRouter re-ranking + DeepSeek reasoning - v3.7.1 with extraction fixes",
+    version="3.7.1",
+    lifespan=lifespan
+)
+
+
+class CrawlRequest(BaseModel):
+    """Request model for adaptive crawling."""
+    start_url: str
+    query: str
+    max_pages: Optional[int] = 50
+    confidence_threshold: Optional[float] = 0.05
+    use_embeddings: Optional[bool] = True
+    embedding_model: Optional[str] = "qwen/qwen3-embedding-8b"
+
+
+class CrawlResponse(BaseModel):
+    """Response model with direct answer."""
+    success: bool
+    answer: str
+    confidence: float
+    pages_crawled: int
+    sources: List[dict]
+    message: str
+    embedding_used: bool
+
+
 async def call_deepseek(
     query: str,
     context: str,
@@ -445,7 +497,7 @@ async def call_deepseek(
     max_tokens: int = 3000,
     max_retries: int = 3
 ) -> str:
-    """Call DeepSeek API to generate answer."""
+    """Call DeepSeek API to generate an answer with retry logic."""
 
     system_prompt = """You are a helpful assistant that provides direct, accurate answers based on the provided web content.
 
@@ -453,7 +505,7 @@ Your task:
 1. Carefully analyze ALL the crawled web content provided
 2. Find the most relevant and detailed information to answer the user's query
 3. Provide a comprehensive, accurate answer in plain text
-4. Include specific details, code examples, legal references, or steps if available
+4. Include specific details, code examples, or steps if available in the content
 5. If the information is incomplete, mention what was found and suggest where to look
 6. Cite the source URLs for the information you use
 
@@ -466,6 +518,7 @@ Crawled Web Content:
 
 Based on the above content, provide a detailed and accurate answer to the query."""
 
+    total_wait = 0
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
@@ -486,9 +539,10 @@ Based on the above content, provide a detailed and accurate answer to the query.
                     }
                 )
 
-                if response.status_code == 429:
+                if response.status_code == 429:  # Rate limited
                     wait_time = 2 ** attempt
-                    print(f"DeepSeek rate limited. Waiting {wait_time}s...", flush=True)
+                    total_wait += wait_time
+                    print(f"DeepSeek rate limited. Waiting {wait_time}s (total: {total_wait}s)...", flush=True)
                     await asyncio.sleep(wait_time)
                     continue
 
@@ -506,355 +560,190 @@ Based on the above content, provide a detailed and accurate answer to the query.
         except httpx.TimeoutException:
             if attempt == max_retries - 1:
                 raise HTTPException(status_code=504, detail="DeepSeek API timeout")
-            await asyncio.sleep(2 ** attempt)
+            wait_time = 2 ** attempt
+            total_wait += wait_time
+            print(f"DeepSeek timeout. Retrying in {wait_time}s (total wait: {total_wait}s)...", flush=True)
+            await asyncio.sleep(wait_time)
 
-    raise HTTPException(status_code=500, detail="DeepSeek failed after retries")
-
-
-# ============================================================================
-# FastAPI Application
-# ============================================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan event handler - initialize models at startup."""
-    print("=" * 70, flush=True)
-    print("Crawl4AI HYBRID BFS CRAWLER v3.8.0 Starting...", flush=True)
-    print("=" * 70, flush=True)
-
-    print(f"BFSDeepCrawlStrategy Available: {BFS_AVAILABLE} (PRIMARY)", flush=True)
-    print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE} (SECONDARY)", flush=True)
-    print(f"OpenRouter API Key: {'Set' if os.environ.get('OPENROUTER_API_KEY') else 'NOT SET'}", flush=True)
-    print(f"DeepSeek API Key: {'Set' if os.environ.get('DEEPSEEK_API_KEY') else 'NOT SET'}", flush=True)
-    print("=" * 70, flush=True)
-
-    # Initialize embedding model
-    print("STARTUP: Initializing embedding model...", flush=True)
-    initialize_embedding_model()
-    print("=" * 70, flush=True)
-
-    print("HYBRID BFS STRATEGY (v3.8.0):", flush=True)
-    print("  1. BFS Deep Crawl: max_depth=3, systematic level-by-level", flush=True)
-    print("  2. SPA Support: wait_for=css:body, process_iframes=True", flush=True)
-    print("  3. Local Semantic Ranking: paraphrase-multilingual-mpnet-base-v2", flush=True)
-    print("  4. OpenRouter Re-ranking: 75% semantic + 25% keyword (optional)", flush=True)
-    print("  5. DeepSeek Answer Generation: deepseek-reasoner", flush=True)
-    print("=" * 70, flush=True)
-
-    print("WHY BFS OVER DFS:", flush=True)
-    print("  - BFS: Explores ALL links at each level before going deeper", flush=True)
-    print("  - DFS: Goes deep on first link, may miss sibling content", flush=True)
-    print("  - For hierarchical legal sites, BFS finds ALL law documents", flush=True)
-    print("=" * 70, flush=True)
-
-    yield
-    print("Shutting down...", flush=True)
+    raise HTTPException(status_code=500, detail="Failed to get response from DeepSeek after retries")
 
 
-app = FastAPI(
-    title="Crawl4AI Hybrid BFS Crawler",
-    description="Hybrid BFS + Semantic crawler for deep content extraction - v3.8.0",
-    version="3.8.0",
-    lifespan=lifespan
-)
+def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) -> str:
+    """Format relevant pages from AdaptiveCrawler into context for LLM."""
+    context_parts = []
+    total_chars = 0
 
-
-class CrawlRequest(BaseModel):
-    """Request model for crawling."""
-    start_url: str
-    query: str
-    max_pages: Optional[int] = 100
-    max_depth: Optional[int] = 3
-    use_embeddings: Optional[bool] = True
-
-
-class CrawlResponse(BaseModel):
-    """Response model."""
-    success: bool
-    answer: str
-    confidence: float
-    pages_crawled: int
-    sources: List[Dict]
-    message: str
-    embedding_used: bool
-    crawl_strategy: str
-
-
-# ============================================================================
-# MAIN CRAWL FUNCTION: Hybrid BFS + Semantic Ranking
-# ============================================================================
-async def run_hybrid_bfs_crawl(
-    request: CrawlRequest,
-    deepseek_api_key: str,
-    openrouter_client: Optional[OpenRouterEmbeddings],
-    domain: str
-) -> CrawlResponse:
-    """
-    HYBRID BFS CRAWL (v3.8.0):
-    1. Use BFS to crawl ALL pages up to max_depth (systematic exploration)
-    2. Apply local semantic scoring to rank pages by relevance
-    3. Optionally re-rank with OpenRouter embeddings
-    4. Generate answer with DeepSeek
-    """
-
-    print("\n" + "=" * 70, flush=True)
-    print("HYBRID BFS CRAWL STARTING", flush=True)
-    print(f"  Strategy: BFSDeepCrawlStrategy (max_depth={request.max_depth})", flush=True)
-    print(f"  Max Pages: {request.max_pages}", flush=True)
-    print(f"  Domain: {domain}", flush=True)
-    print("=" * 70, flush=True)
-
-    # Extract keywords for URL scoring
-    keywords = extract_keywords(request.query)
-    print(f"Keywords extracted: {keywords}", flush=True)
-
-    # Configure BFS strategy
-    domain_filter = DomainFilter(
-        allowed_domains=[domain],
-        blocked_domains=[]
-    )
-
-    keyword_scorer = KeywordRelevanceScorer(
-        keywords=keywords,
-        weight=1.0
-    )
-
-    bfs_strategy = BFSDeepCrawlStrategy(
-        max_depth=request.max_depth or 3,
-        include_external=False,
-        max_pages=request.max_pages or 100,
-        filter_chain=FilterChain([domain_filter]),
-        url_scorer=keyword_scorer
-    )
-
-    # SPA-friendly crawler configuration
-    crawl_config = CrawlerRunConfig(
-        deep_crawl_strategy=bfs_strategy,
-        wait_for="css:body",
-        process_iframes=True,
-        delay_before_return_html=2.0,
-        page_timeout=60000,
-        cache_mode=CacheMode.BYPASS,
-        stream=False,
-        verbose=True
-    )
-
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=True,
-        java_script_enabled=True
-    )
-
-    # Execute BFS crawl
-    print("\nStarting BFS deep crawl...", flush=True)
-    all_pages = []
-
-    try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            results = await crawler.arun(
-                url=request.start_url,
-                config=crawl_config
-            )
-
-            # Handle results (can be list or single result)
-            if isinstance(results, list):
-                crawled_results = results
-            else:
-                crawled_results = [results] if results else []
-
-            print(f"BFS crawl returned {len(crawled_results)} results", flush=True)
-
-            # Extract content from each result
-            for i, result in enumerate(crawled_results):
-                if not result:
-                    continue
-
-                # Check success
-                if hasattr(result, 'success') and not result.success:
-                    continue
-
-                url = result.url if hasattr(result, 'url') else f"page_{i}"
-                content = extract_content_from_result(result)
-                depth = result.metadata.get('depth', 0) if hasattr(result, 'metadata') else 0
-
-                if content and len(content) >= 100:
-                    all_pages.append({
-                        'url': url,
-                        'content': content,
-                        'depth': depth,
-                        'score': 0.5  # Default score, will be updated
-                    })
-                    print(f"  [{i}] Depth {depth}: {len(content):,} chars - {url[:60]}...", flush=True)
-
-    except Exception as e:
-        print(f"BFS crawl error: {e}", flush=True)
-        traceback.print_exc()
-        return CrawlResponse(
-            success=False,
-            answer=f"Crawl failed: {str(e)}",
-            confidence=0.0,
-            pages_crawled=0,
-            sources=[],
-            message=f"BFS crawl error: {str(e)}",
-            embedding_used=False,
-            crawl_strategy="bfs"
-        )
-
-    pages_crawled = len(all_pages)
-    print(f"\nBFS crawl complete: {pages_crawled} pages with content", flush=True)
-
-    if pages_crawled == 0:
-        return CrawlResponse(
-            success=False,
-            answer="No content could be extracted from the crawled pages.",
-            confidence=0.0,
-            pages_crawled=0,
-            sources=[],
-            message="BFS crawl found no extractable content",
-            embedding_used=False,
-            crawl_strategy="bfs"
-        )
-
-    # STEP 2: Apply local semantic scoring
-    print("\nApplying local semantic scoring...", flush=True)
-    contents = [p['content'][:2000] for p in all_pages]  # Use first 2000 chars for scoring
-    semantic_scores = compute_semantic_scores(request.query, contents)
-
-    for i, page in enumerate(all_pages):
-        page['score'] = semantic_scores[i] if i < len(semantic_scores) else 0.5
-
-    # Sort by semantic score
-    all_pages.sort(key=lambda x: x['score'], reverse=True)
-
-    print("Top 10 pages after local semantic scoring:", flush=True)
-    for i, page in enumerate(all_pages[:10]):
-        score_pct = int(page['score'] * 100)
-        print(f"  {i+1}. {score_pct}% (depth {page['depth']}) - {page['url'][:60]}", flush=True)
-
-    # STEP 3: Optional OpenRouter re-ranking
-    embedding_used = False
-    if openrouter_client and all_pages:
-        try:
-            print("\nApplying OpenRouter re-ranking...", flush=True)
-            all_pages = await rerank_with_openrouter(
-                query=request.query,
-                pages=all_pages,
-                embedding_client=openrouter_client,
-                top_k=20
-            )
-            embedding_used = True
-
-            print("Top 10 pages after OpenRouter re-ranking:", flush=True)
-            for i, page in enumerate(all_pages[:10]):
-                score_pct = int(page['score'] * 100)
-                emb_score = int(page.get('embedding_score', 0) * 100)
-                print(f"  {i+1}. Combined: {score_pct}% (Semantic: {emb_score}%) - {page['url'][:50]}", flush=True)
-        except Exception as e:
-            print(f"OpenRouter re-ranking failed: {e}, using local scores", flush=True)
-            all_pages = all_pages[:20]
-    else:
-        all_pages = all_pages[:20]
-
-    # STEP 4: Generate answer with DeepSeek
-    context = format_context_for_llm(all_pages)
-
-    if not context.strip():
-        return CrawlResponse(
-            success=False,
-            answer="Pages were crawled but contained insufficient readable content.",
-            confidence=0.0,
-            pages_crawled=pages_crawled,
-            sources=[],
-            message="Content extraction yielded empty context",
-            embedding_used=embedding_used,
-            crawl_strategy="bfs"
-        )
-
-    print(f"\nContext prepared: {len(context):,} chars", flush=True)
-    print("Generating answer with DeepSeek-reasoner...", flush=True)
-
-    try:
-        answer = await call_deepseek(
-            query=request.query,
-            context=context,
-            api_key=deepseek_api_key
-        )
-    except Exception as e:
-        print(f"DeepSeek error: {e}", flush=True)
-        return CrawlResponse(
-            success=False,
-            answer=f"Answer generation failed: {str(e)}",
-            confidence=0.5,
-            pages_crawled=pages_crawled,
-            sources=[{"url": p['url'], "relevance": round(p['score'], 3)} for p in all_pages[:10]],
-            message=f"DeepSeek error: {str(e)}",
-            embedding_used=embedding_used,
-            crawl_strategy="bfs"
-        )
-
-    # Prepare sources
-    sources = []
-    seen_urls = set()
-    for page in all_pages[:15]:
+    for i, page in enumerate(relevant_pages, 1):
         url = page.get('url', 'unknown')
-        if url in seen_urls:
+        score = page.get('score', 0)
+        embedding_score = page.get('embedding_score', None)
+        content = page.get('content', '')
+
+        if not content or len(content) < 50:
             continue
-        seen_urls.add(url)
-        source_info = {
-            "url": url,
-            "relevance": round(page.get('score', 0), 3),
-            "depth": page.get('depth', 0)
-        }
-        if embedding_used and 'embedding_score' in page:
-            source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
-        sources.append(source_info)
 
-    # Calculate confidence based on top scores
-    avg_top_score = sum(p['score'] for p in all_pages[:5]) / min(5, len(all_pages))
-    confidence = round(avg_top_score, 3)
+        # Truncate individual page content
+        page_text = content[:5000] if len(content) > 5000 else content
 
-    return CrawlResponse(
-        success=True,
-        answer=answer,
-        confidence=confidence,
-        pages_crawled=pages_crawled,
-        sources=sources,
-        message=f"Hybrid BFS crawl: {pages_crawled} pages, depth={request.max_depth}" +
-                (", with OpenRouter re-ranking" if embedding_used else ", with local semantic scoring"),
-        embedding_used=embedding_used,
-        crawl_strategy="hybrid_bfs"
-    )
+        # ✅ FIXED: Proper format string without double multiplication
+        if embedding_score is not None:
+            score_info = f"Combined: {int(score * 100)}%, Semantic: {int(embedding_score * 100)}%"
+        else:
+            score_info = f"Relevance: {int(score * 100)}%"
+
+        entry = f"""
+=== Page {i} ({score_info}): {url} ===
+{page_text}
+
+"""
+        if total_chars + len(entry) > max_chars:
+            break
+
+        context_parts.append(entry)
+        total_chars += len(entry)
+
+    return "\n".join(context_parts)
 
 
-# ============================================================================
-# API Endpoints
-# ============================================================================
+def extract_pages_from_result(result) -> List[dict]:
+    """
+    FIX: Extract pages from adaptive crawl result's knowledge base.
+    
+    CrawlState structure:
+    - result.knowledge_base: List of CrawlResult objects
+    - Each CrawlResult has:
+      - .url: str
+      - .markdown: MarkdownGenerationResult object
+        - .raw_markdown: str (the actual content!)
+        - .fit_markdown: str (filtered content, if available)
+        - .fit_html: str (filtered HTML, if available)
+      - .extracted_content: str (optional fallback)
+    """
+    pages = []
+    
+    print(f"\n>>> Extracting pages from result", flush=True)
+    
+    try:
+        # Check if knowledge_base exists
+        if not hasattr(result, 'knowledge_base') or not result.knowledge_base:
+            print(f"  ⚠️  No knowledge_base found in result", flush=True)
+            return []
+        
+        kb = result.knowledge_base
+        kb_len = len(kb) if hasattr(kb, '__len__') else 'unknown'
+        print(f"  ✓ Found {kb_len} items in knowledge base", flush=True)
+        
+        # Iterate through knowledge base items (should be CrawlResult objects)
+        for i, doc in enumerate(kb):
+            try:
+                # Get URL
+                url = None
+                if hasattr(doc, 'url'):
+                    url = doc.url
+                else:
+                    url = f'doc_{i}'
+                
+                # Extract content from .markdown object (MarkdownGenerationResult)
+                content = None
+                content_source = None
+                
+                if hasattr(doc, 'markdown') and doc.markdown:
+                    md = doc.markdown
+                    
+                    # Try fit_markdown first (filtered content, more relevant)
+                    if hasattr(md, 'fit_markdown') and md.fit_markdown:
+                        content = md.fit_markdown
+                        content_source = "fit_markdown"
+                    # Fallback to raw_markdown
+                    elif hasattr(md, 'raw_markdown') and md.raw_markdown:
+                        content = md.raw_markdown
+                        content_source = "raw_markdown"
+                
+                # If no markdown, try extracted_content
+                if not content and hasattr(doc, 'extracted_content') and doc.extracted_content:
+                    content = doc.extracted_content
+                    content_source = "extracted_content"
+                
+                # Validate we have content
+                if not content:
+                    print(f"    [{i}] ✗ No content found for {url[:50]}", flush=True)
+                    continue
+                
+                # Convert to string and validate length
+                content_str = str(content).strip()
+                if len(content_str) < 50:
+                    print(f"    [{i}] ✗ Content too short ({len(content_str)} chars)", flush=True)
+                    continue
+                
+                # Add to pages
+                pages.append({
+                    'url': url,
+                    'content': content_str,
+                    'score': 0.5,
+                    'content_source': content_source
+                })
+                print(f"    [{i}] ✓ {len(content_str):>6} chars from {content_source:>15} - {url[:50]}", flush=True)
+            
+            except Exception as e:
+                print(f"    [{i}] ✗ Error processing doc: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        
+        # Summary
+        total_chars = sum(len(p.get('content', '')) for p in pages)
+        print(f"  ✅ Successfully extracted {len(pages)} pages ({total_chars:,} chars total)", flush=True)
+    
+    except Exception as e:
+        print(f"  ❌ Exception in extract_pages_from_result: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    
+    print(f"<<< Returning {len(pages)} pages\n", flush=True)
+    
+    return pages
+
+
 @app.get("/")
 async def root():
     """Service status endpoint."""
+    openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
-        "service": "Crawl4AI Hybrid BFS Crawler",
-        "version": "3.8.0",
-        "status": "Ready",
-        "strategy": "Hybrid BFS + Semantic Ranking",
-        "features": {
-            "bfs_deep_crawl": BFS_AVAILABLE,
-            "adaptive_fallback": ADAPTIVE_AVAILABLE,
-            "local_embeddings": EMBEDDING_MODEL_VERIFIED,
-            "openrouter_reranking": bool(os.environ.get("OPENROUTER_API_KEY")),
-            "deepseek_answers": bool(os.environ.get("DEEPSEEK_API_KEY"))
-        },
-        "why_bfs": [
-            "BFS explores ALL links at each depth level before going deeper",
-            "Guarantees finding sibling pages (all law documents at same level)",
-            "max_depth=3 ensures reaching content pages like go.asp?d=lei-17-2009cn",
-            "DFS would go deep on first link and potentially miss important siblings"
+        "message": "Crawl4AI Adaptive Crawler v3.7.1 (SPA + EXTRACTION FIXES) is running!",
+        "version": "3.7.1",
+        "status": "✅ Ready",
+        "adaptive_available": ADAPTIVE_AVAILABLE,
+        "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
+        "openrouter_reranking": openrouter_configured,
+        "embedding_model_verified": EMBEDDING_MODEL_VERIFIED,
+        "fixes_v3.7.1": [
+            "✓ FIX: SPAFriendlyCrawler wrapper for JavaScript/SPA sites",
+            "✓ FIX: Automatic CrawlerRunConfig injection to AdaptiveCrawler",
+            "✓ FIX: wait_for='css:body' ensures content renders",
+            "✓ FIX: process_iframes=True includes embedded content",
+            "✓ FIX: delay_before_return_html=2.0s for JS execution",
+            "✓ FIX: Embedding model verification at startup",
+            "✓ FIX: Verbose logging for debugging",
+            "✓ FIX 4: CrawlResult.markdown extraction (was looking for .content instead of .markdown.raw_markdown)",
+            "✓ FIX 5: Format string bugs (:.0% formatter with manual multiplication)",
+            "✓ FIX 6: Early validation of extracted content - fail fast if KB extraction fails"
         ],
-        "architecture": [
-            "1. BFSDeepCrawlStrategy - Systematic depth crawling",
-            "2. SPA-friendly config - JavaScript rendering",
-            "3. Local semantic scoring - paraphrase-multilingual-mpnet-base-v2",
-            "4. OpenRouter re-ranking (optional) - Additional refinement",
-            "5. DeepSeek-reasoner - Answer generation"
+        "previous_solutions": [
+            "✓ Aggressive stopping prevention (confidence=0.05)",
+            "✓ Better embedding model (mpnet multilingual)",
+            "✓ Better re-ranking weights (75/25)",
+            "✓ More query variations (20)",
+            "✓ Deeper crawling (50 pages, 25 links)",
+            "✓ Retry logic for API calls"
+        ],
+        "features": [
+            "LOCAL multilingual embedding strategy",
+            "SPA/JavaScript site support via SPAFriendlyCrawler",
+            "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+            "Chinese language support",
+            "OpenRouter qwen3-embedding-8b (optional)",
+            "Retry logic with exponential backoff",
+            "Aggressive exploration prevents early termination",
+            "DeepSeek-reasoner for answer generation"
         ]
     }
 
@@ -862,27 +751,14 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "version": "3.8.0",
-        "bfs_available": BFS_AVAILABLE,
-        "embedding_model_ready": EMBEDDING_MODEL_VERIFIED
-    }
+    return {"status": "healthy"}
 
 
 @app.post("/crawl", response_model=CrawlResponse)
-async def crawl(request: CrawlRequest):
-    """
-    Perform hybrid BFS crawl with semantic ranking.
+async def adaptive_crawl(request: CrawlRequest):
+    """Perform adaptive crawling and return a direct answer."""
 
-    Strategy:
-    1. BFS deep crawl (max_depth=3) for systematic exploration
-    2. Local semantic scoring with multilingual embeddings
-    3. Optional OpenRouter re-ranking
-    4. DeepSeek answer generation
-    """
-
-    # Validate API keys
+    # Check for required API keys
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not deepseek_api_key:
         raise HTTPException(
@@ -891,188 +767,533 @@ async def crawl(request: CrawlRequest):
         )
 
     openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+    use_embeddings = request.use_embeddings and bool(openrouter_api_key)
 
-    # Parse domain from URL
-    parsed_url = urlparse(request.start_url)
-    domain = parsed_url.netloc
+    if request.use_embeddings and not openrouter_api_key:
+        print("Warning: OPENROUTER_API_KEY not set, skipping embedding re-ranking", flush=True)
 
-    # Detect query languages
-    lang_info = detect_query_languages(request.query)
+    try:
+        # Extract domain from start URL
+        parsed_url = urlparse(request.start_url)
+        domain = parsed_url.netloc
 
-    print("\n" + "=" * 70, flush=True)
-    print("NEW CRAWL REQUEST", flush=True)
-    print(f"  Query: {request.query}", flush=True)
-    print(f"  Languages: {lang_info['languages']}", flush=True)
-    print(f"  Start URL: {request.start_url}", flush=True)
-    print(f"  Domain: {domain}", flush=True)
-    print(f"  Max Pages: {request.max_pages}", flush=True)
-    print(f"  Max Depth: {request.max_depth}", flush=True)
-    print(f"  OpenRouter: {'Enabled' if openrouter_api_key else 'Disabled'}", flush=True)
-    print("=" * 70, flush=True)
+        # Detect languages in query
+        lang_info = detect_query_languages(request.query)
 
-    # Create OpenRouter client if available
-    openrouter_client = None
-    if openrouter_api_key and request.use_embeddings:
-        openrouter_client = OpenRouterEmbeddings(api_key=openrouter_api_key)
+        print(f"\n{'='*60}", flush=True)
+        print(f"Query: {request.query}", flush=True)
+        print(f"Query Languages: {lang_info['languages']}", flush=True)
+        print(f"Start URL: {request.start_url}", flush=True)
+        print(f"Domain: {domain}", flush=True)
+        print(f"Max pages: {request.max_pages}", flush=True)
+        print(f"Confidence threshold: {request.confidence_threshold}", flush=True)
+        print(f"Embedding re-ranking: {use_embeddings}", flush=True)
+        if use_embeddings:
+            print(f"Embedding model: {request.embedding_model}", flush=True)
+        print(f"{'='*60}", flush=True)
 
-    # Check which strategy to use
-    if BFS_AVAILABLE:
-        return await run_hybrid_bfs_crawl(
-            request=request,
-            deepseek_api_key=deepseek_api_key,
-            openrouter_client=openrouter_client,
-            domain=domain
-        )
-    elif ADAPTIVE_AVAILABLE:
-        # Fallback to adaptive crawl if BFS not available
-        print("BFS not available, falling back to AdaptiveCrawler", flush=True)
-        return await run_adaptive_fallback(
-            request=request,
-            deepseek_api_key=deepseek_api_key,
-            openrouter_client=openrouter_client,
-            domain=domain
-        )
-    else:
-        raise HTTPException(
-            status_code=500,
-            detail="Neither BFS nor Adaptive crawling is available"
-        )
+        # Create embedding client if available
+        embedding_client = None
+        if use_embeddings:
+            embedding_client = OpenRouterEmbeddings(
+                api_key=openrouter_api_key,
+                model=request.embedding_model
+            )
+
+        if ADAPTIVE_AVAILABLE:
+            return await run_adaptive_crawl(
+                request=request,
+                deepseek_api_key=deepseek_api_key,
+                embedding_client=embedding_client,
+                domain=domain
+            )
+        elif DEEP_CRAWL_AVAILABLE:
+            return await run_fallback_deep_crawl(
+                request=request,
+                deepseek_api_key=deepseek_api_key,
+                embedding_client=embedding_client,
+                domain=domain
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Neither AdaptiveCrawler nor deep crawling is available"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-async def run_adaptive_fallback(
+async def run_adaptive_crawl(
     request: CrawlRequest,
     deepseek_api_key: str,
-    openrouter_client: Optional[OpenRouterEmbeddings],
+    embedding_client: Optional[OpenRouterEmbeddings],
     domain: str
 ) -> CrawlResponse:
-    """Fallback to AdaptiveCrawler if BFS is not available."""
+    """Run crawl using AdaptiveCrawler with LOCAL EMBEDDING strategy + OpenRouter re-ranking."""
 
-    print("Using ADAPTIVE FALLBACK (BFS not available)", flush=True)
+    if request.use_embeddings:
+        print("Using EMBEDDING strategy for semantic link selection", flush=True)
+        print("  ✓ SOLUTION 2: Model: paraphrase-multilingual-mpnet-base-v2", flush=True)
+        print("  ✓ SOLUTION 1: Aggressive exploration: confidence_threshold=0.05", flush=True)
+        print("  ✓ SOLUTION 4: Query variations: 20", flush=True)
+        print("  ✓ SOLUTION 5: max_pages=50, top_k_links=25", flush=True)
 
-    config = AdaptiveConfig(
-        strategy="embedding" if EMBEDDING_MODEL_VERIFIED else "statistical",
-        embedding_model="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-        confidence_threshold=0.05,
-        max_pages=request.max_pages or 100,
-        top_k_links=30,
-        embedding_min_confidence_threshold=0.02,
-        embedding_min_relative_improvement=0.01,
-        n_query_variations=20
+        config = AdaptiveConfig(
+            strategy="embedding",
+            embedding_model="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+            confidence_threshold=0.05,
+            embedding_min_confidence_threshold=0.02,
+            embedding_validation_min_score=0.1,
+            embedding_min_relative_improvement=0.01,
+            n_query_variations=20,
+            max_pages=request.max_pages or 50,
+            top_k_links=25,
+            embedding_coverage_radius=0.35,
+            embedding_k_exp=1.5,
+            embedding_overlap_threshold=0.80,
+        )
+        used_embedding_crawl = True
+    else:
+        print("Using STATISTICAL (BM25) strategy", flush=True)
+        config = AdaptiveConfig(
+            strategy="statistical",
+            confidence_threshold=0.05,
+            max_pages=request.max_pages or 50,
+            top_k_links=25,
+            min_gain_threshold=0.01
+        )
+        used_embedding_crawl = False
+
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=True,  # Enable verbose for debugging
+        java_script_enabled=True,  # Ensure JS is enabled for SPA sites
+    )
+
+    # FIX: Use SPAFriendlyCrawler wrapper to automatically inject CrawlerRunConfig
+    # This solves the root cause: AdaptiveCrawler doesn't accept CrawlerRunConfig,
+    # so SPA sites (like macaolaws.zeabur.app) don't render properly.
+    async with AsyncWebCrawler(config=browser_config) as raw_crawler:
+        # Wrap the crawler with SPA-friendly defaults
+        crawler = SPAFriendlyCrawler(raw_crawler)
+        adaptive = AdaptiveCrawler(crawler, config=config)
+
+        print("Starting adaptive crawl with AGGRESSIVE EXPLORATION...", flush=True)
+        print(f"  SPAFriendlyCrawler will inject: wait_for, process_iframes, delay", flush=True)
+        result = await adaptive.digest(
+            start_url=request.start_url,
+            query=request.query
+        )
+
+        # VERBOSE DEBUG: Log crawl result details
+        print(f"\n{'='*40} CRAWL RESULT DEBUG {'='*40}", flush=True)
+        print(f"Result type: {type(result).__name__}", flush=True)
+        
+        if result:
+            # Safely handle crawled_urls (it's a set, not a list)
+            if hasattr(result, 'crawled_urls'):
+                crawled_urls_count = len(result.crawled_urls)
+                print(f"✓ Crawled URLs count: {crawled_urls_count}", flush=True)
+                crawled_urls_list = list(result.crawled_urls)[:5]
+                print(f"  Sample URLs: {crawled_urls_list}", flush=True)
+            else:
+                crawled_urls_count = 0
+            
+            # Check knowledge_base
+            if hasattr(result, 'knowledge_base'):
+                kb = result.knowledge_base
+                print(f"✓ Knowledge base exists: {kb is not None}", flush=True)
+                
+                if kb:
+                    kb_type = type(kb).__name__
+                    kb_len = len(kb) if hasattr(kb, '__len__') else 'unknown'
+                    print(f"  Type: {kb_type}, Length: {kb_len}", flush=True)
+                    
+                    if isinstance(kb, list) and len(kb) > 0:
+                        print(f"  KB[0] type: {type(kb[0]).__name__}", flush=True)
+                        kb_item = kb[0]
+                        
+                        # Inspect first item
+                        if isinstance(kb_item, dict):
+                            print(f"    Dict keys: {list(kb_item.keys())}", flush=True)
+                        else:
+                            # It's an object (CrawlResult)
+                            obj_type = type(kb_item).__name__
+                            print(f"    Object type: {obj_type}", flush=True)
+                            
+                            # Check for .markdown attribute
+                            if hasattr(kb_item, 'markdown'):
+                                md = kb_item.markdown
+                                print(f"    Has .markdown: {md is not None}", flush=True)
+                                if md:
+                                    md_type = type(md).__name__
+                                    print(f"      .markdown type: {md_type}", flush=True)
+                                    
+                                    for attr in ['raw_markdown', 'fit_markdown', 'fit_html']:
+                                        if hasattr(md, attr):
+                                            val = getattr(md, attr, None)
+                                            if val:
+                                                val_len = len(str(val))
+                                                print(f"        .{attr}: {val_len} chars", flush=True)
+                else:
+                    print(f"  ⚠️ Knowledge base is EMPTY (None)", flush=True)
+            
+            # Check term extraction
+            if hasattr(result, 'term_frequencies'):
+                tf = result.term_frequencies
+                if tf:
+                    print(f"✓ Term frequencies: {len(tf)} terms found", flush=True)
+                    top_terms = sorted(tf.items(), key=lambda x: x[1], reverse=True)[:5]
+                    print(f"  Top terms: {top_terms}", flush=True)
+                else:
+                    print(f"⚠️ Term frequencies: EMPTY (0 terms)", flush=True)
+            
+            # Check documents with terms
+            if hasattr(result, 'documents_with_terms'):
+                dwt = result.documents_with_terms
+                if dwt:
+                    print(f"✓ Documents with terms: {len(dwt)} documents", flush=True)
+                else:
+                    print(f"⚠️ Documents with terms: EMPTY", flush=True)
+            
+            # Check metrics
+            if hasattr(result, 'metrics'):
+                metrics = result.metrics
+                if metrics:
+                    print(f"✓ Metrics: {metrics}", flush=True)
+        
+        print(f"{'='*40} END DEBUG {'='*40}\n", flush=True)
+
+        # FIX: Handle None/empty result
+        if not result:
+            return CrawlResponse(
+                success=False,
+                answer="Crawl returned no result.",
+                confidence=0.0,
+                pages_crawled=0,
+                sources=[],
+                message="Crawling failed - no result returned",
+                embedding_used=False
+            )
+
+        # Get crawl statistics
+        confidence = adaptive.confidence if hasattr(adaptive, 'confidence') else 0.0
+        crawled_urls = result.crawled_urls if hasattr(result, 'crawled_urls') else []
+        pages_crawled = len(crawled_urls)  # ✅ This works because len() works on sets too
+
+        print(f"Crawl complete: {pages_crawled} pages, {int(confidence * 100)}% confidence", flush=True)
+
+        if hasattr(adaptive, 'print_stats'):
+            adaptive.print_stats()
+
+        if pages_crawled == 0:
+            return CrawlResponse(
+                success=False,
+                answer="No pages could be crawled from the provided URL.",
+                confidence=0.0,
+                pages_crawled=0,
+                sources=[],
+                message="Crawling failed - no pages found",
+                embedding_used=False
+            )
+
+        # FIX: Extract pages from knowledge base
+        relevant_pages = extract_pages_from_result(result)
+        
+        # Early validation: if no pages extracted, fail fast
+        if not relevant_pages:
+            print(f"\n⚠️  CRITICAL: No pages extracted from knowledge base!", flush=True)
+            print(f"   Crawled URLs: {pages_crawled}", flush=True)
+            if hasattr(result, 'knowledge_base'):
+                kb_size = len(result.knowledge_base) if result.knowledge_base else 0
+                print(f"   Knowledge base size: {kb_size}", flush=True)
+            
+            return CrawlResponse(
+                success=False,
+                answer="Pages were crawled but content extraction failed. This may indicate an issue with the target website's structure or content encoding.",
+                confidence=confidence,
+                pages_crawled=pages_crawled,
+                sources=[],
+                message=f"EXTRACTION FAILURE: Crawled {pages_crawled} pages but extracted 0 pages from knowledge base",
+                embedding_used=False
+            )
+
+        strategy_name = "Embedding" if used_embedding_crawl else "BM25"
+        print(f"\n{strategy_name} top pages (before re-ranking):", flush=True)
+        for i, page in enumerate(relevant_pages[:5], 1):
+            # ✅ FIXED: Proper format string
+            score_pct = int(page.get('score', 0) * 100)
+            print(f"  {i}. {score_pct}% - {page.get('url', 'unknown')}", flush=True)
+
+        # Re-rank with OpenRouter embeddings if available
+        embedding_used = False
+        if embedding_client and relevant_pages:
+            try:
+                print(f"\nRe-ranking with OpenRouter...", flush=True)
+                relevant_pages = await rerank_by_embeddings(
+                    query=request.query,
+                    pages=relevant_pages,
+                    embedding_client=embedding_client,
+                    top_k=15
+                )
+                embedding_used = True
+
+                print(f"After OpenRouter re-ranking:", flush=True)
+                for i, page in enumerate(relevant_pages[:5], 1):
+                    emb_score = page.get('embedding_score', 0)
+                    # ✅ FIXED: Proper format string without double multiplication
+                    combined_pct = int(page['score'] * 100)
+                    emb_pct = int(emb_score * 100)
+                    print(f"  {i}. Combined: {combined_pct}% (Semantic: {emb_pct}%) - {page['url']}", flush=True)
+            except Exception as e:
+                print(f"OpenRouter re-ranking failed: {e}, using crawl results", flush=True)
+                relevant_pages = relevant_pages[:15]
+        else:
+            relevant_pages = relevant_pages[:15]
+
+        # Format context for DeepSeek  
+        context = format_adaptive_context(relevant_pages)  
+        
+        if not context.strip():  
+            print(f"\n⚠️  WARNING: Formatted context is empty!", flush=True)
+            return CrawlResponse(  
+                success=False,  
+                answer="Pages were crawled and extracted but contain insufficient readable content.",  
+                confidence=confidence,  
+                pages_crawled=pages_crawled,  
+                sources=[],  
+                message="CONTENT VALIDATION FAILURE: Context formatting produced empty result",  
+                embedding_used=embedding_used  
+            )  
+        
+        print(f"\nContext length: {len(context):,} chars", flush=True)  
+        print("Generating answer with DeepSeek-reasoner...", flush=True)  
+        
+        answer = await call_deepseek(  
+            query=request.query,  
+            context=context,  
+            api_key=deepseek_api_key  
+        )  
+        
+        # Prepare sources with deduplication  
+        sources = []  
+        seen_urls = set()  
+        for page in relevant_pages[:15]:  
+            url = page.get('url', 'unknown')  
+            if url in seen_urls:  
+                continue  
+            seen_urls.add(url)  
+            source_info = {  
+                "url": url,  
+                "relevance": round(page.get('score', 0), 3)  
+            }  
+            if embedding_used and 'embedding_score' in page:  
+                source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)  
+            sources.append(source_info)  
+        
+        crawl_strategy = "embedding" if used_embedding_crawl else "statistical"  
+        
+        # ✅ FIXED: Proper format string
+        return CrawlResponse(  
+            success=True,  
+            answer=answer,  
+            confidence=round(confidence, 3),  
+            pages_crawled=pages_crawled,  
+            sources=sources,  
+            message=(  
+                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {int(confidence*100)}% confidence" +  
+                (" (with OpenRouter re-ranking)" if embedding_used else "")  
+            ),  
+            embedding_used=embedding_used or used_embedding_crawl  
+        )  
+
+
+async def run_fallback_deep_crawl(
+    request: CrawlRequest,
+    deepseek_api_key: str,
+    embedding_client: Optional[OpenRouterEmbeddings],
+    domain: str
+) -> CrawlResponse:
+    """Fallback to deep crawling if AdaptiveCrawler is not available."""
+
+    print("Using FALLBACK deep crawl (BestFirst strategy)", flush=True)
+
+    domain_filter = DomainFilter(
+        allowed_domains=[domain],
+        blocked_domains=[]
+    )
+
+    stop_words = {
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+        'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
+        'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+        'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
+        'what', 'which', 'who', 'how', 'when', 'where', 'why', 'i', 'you',
+        'show', 'get', 'find', 'give', 'me', 'my', 'your', 'want', 'need',
+        '我', '是', '在', '会', '被', '了', '吗', '嘛'
+    }
+    keywords = [
+        word.lower() for word in request.query.split()
+        if len(word) > 2 and word.lower() not in stop_words
+    ]
+
+    print(f"Keywords: {keywords}", flush=True)
+
+    url_scorer = KeywordRelevanceScorer(
+        keywords=keywords,
+        weight=0.9
+    )
+
+    strategy = BestFirstCrawlingStrategy(
+        max_depth=4,
+        include_external=False,
+        max_pages=request.max_pages or 50,
+        filter_chain=FilterChain([domain_filter]),
+        url_scorer=url_scorer
+    )
+
+    crawl_config = CrawlerRunConfig(
+        deep_crawl_strategy=strategy,
+        stream=False,
+        verbose=True
     )
 
     browser_config = BrowserConfig(
         headless=True,
-        verbose=True,
-        java_script_enabled=True
+        verbose=False,
     )
 
-    all_pages = []
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        print("Starting deep crawl with SOLUTION 5: Deeper exploration...", flush=True)
+        results = await crawler.arun(
+            url=request.start_url,
+            config=crawl_config
+        )
 
-    try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            adaptive = AdaptiveCrawler(crawler, config=config)
+        if isinstance(results, list):
+            crawled_pages = results
+        else:
+            crawled_pages = [results] if results else []
 
-            result = await adaptive.digest(
-                start_url=request.start_url,
-                query=request.query
+        successful_pages = [r for r in crawled_pages if hasattr(r, 'success') and r.success]
+        pages_crawled = len(successful_pages)
+
+        print(f"Crawled {pages_crawled} pages successfully", flush=True)
+
+        if not successful_pages:
+            return CrawlResponse(
+                success=False,
+                answer="No content could be crawled from the provided URL.",
+                confidence=0.0,
+                pages_crawled=0,
+                sources=[],
+                message="Crawling failed - no pages found",
+                embedding_used=False
             )
 
-            if result and hasattr(result, 'knowledge_base') and result.knowledge_base:
-                for doc in result.knowledge_base:
-                    url = doc.url if hasattr(doc, 'url') else 'unknown'
-                    content = extract_content_from_result(doc)
-                    if content and len(content) >= 100:
-                        all_pages.append({
-                            'url': url,
-                            'content': content,
-                            'score': 0.5,
-                            'depth': 0
-                        })
+        pages_for_ranking = []
+        for result in successful_pages:
+            url = result.url if hasattr(result, 'url') else str(result)
+            content = ""
+            
+            # FIX: Extract from .markdown properly
+            if hasattr(result, 'markdown') and result.markdown:
+                md = result.markdown
+                if hasattr(md, 'fit_markdown') and md.fit_markdown:
+                    content = md.fit_markdown
+                elif hasattr(md, 'raw_markdown') and md.raw_markdown:
+                    content = md.raw_markdown
+            
+            # Fallback
+            if not content and hasattr(result, 'extracted_content') and result.extracted_content:
+                content = result.extracted_content
 
-            pages_crawled = len(result.crawled_urls) if hasattr(result, 'crawled_urls') else len(all_pages)
+            if content and len(content) >= 50:
+                pages_for_ranking.append({
+                    'url': url,
+                    'content': content,
+                    'score': 0.5
+                })
 
-    except Exception as e:
-        print(f"Adaptive crawl error: {e}", flush=True)
-        return CrawlResponse(
-            success=False,
-            answer=f"Adaptive crawl failed: {str(e)}",
-            confidence=0.0,
-            pages_crawled=0,
-            sources=[],
-            message=f"Adaptive fallback error: {str(e)}",
-            embedding_used=False,
-            crawl_strategy="adaptive_fallback"
-        )
+        embedding_used = False
+        if embedding_client and pages_for_ranking:
+            try:
+                pages_for_ranking = await rerank_by_embeddings(
+                    query=request.query,
+                    pages=pages_for_ranking,
+                    embedding_client=embedding_client,
+                    top_k=15
+                )
+                embedding_used = True
+            except Exception as e:
+                print(f"Embedding re-ranking failed: {e}", flush=True)
+                pages_for_ranking = pages_for_ranking[:15]
+        else:
+            pages_for_ranking = pages_for_ranking[:15]
 
-    if not all_pages:
-        return CrawlResponse(
-            success=False,
-            answer="No content extracted from adaptive crawl.",
-            confidence=0.0,
-            pages_crawled=pages_crawled,
-            sources=[],
-            message="Adaptive crawl yielded no content",
-            embedding_used=False,
-            crawl_strategy="adaptive_fallback"
-        )
+        context = format_adaptive_context(pages_for_ranking)
 
-    # Apply semantic scoring
-    contents = [p['content'][:2000] for p in all_pages]
-    scores = compute_semantic_scores(request.query, contents)
-    for i, page in enumerate(all_pages):
-        page['score'] = scores[i] if i < len(scores) else 0.5
-    all_pages.sort(key=lambda x: x['score'], reverse=True)
-
-    # Optional OpenRouter re-ranking
-    embedding_used = False
-    if openrouter_client:
-        try:
-            all_pages = await rerank_with_openrouter(
-                request.query, all_pages, openrouter_client, top_k=15
+        if not context.strip():
+            return CrawlResponse(
+                success=False,
+                answer="Pages were crawled but no readable content was extracted.",
+                confidence=0.0,
+                pages_crawled=pages_crawled,
+                sources=[],
+                message="No content extracted",
+                embedding_used=embedding_used
             )
-            embedding_used = True
-        except Exception:
-            all_pages = all_pages[:15]
-    else:
-        all_pages = all_pages[:15]
 
-    # Generate answer
-    context = format_context_for_llm(all_pages)
-    if not context.strip():
-        return CrawlResponse(
-            success=False,
-            answer="No readable content for answer generation.",
-            confidence=0.0,
-            pages_crawled=pages_crawled,
-            sources=[],
-            message="Empty context from adaptive crawl",
-            embedding_used=embedding_used,
-            crawl_strategy="adaptive_fallback"
+        print(f"Context length: {len(context):,} chars", flush=True)
+        print("Generating answer with DeepSeek-reasoner...", flush=True)
+
+        answer = await call_deepseek(
+            query=request.query,
+            context=context,
+            api_key=deepseek_api_key
         )
 
-    answer = await call_deepseek(request.query, context, deepseek_api_key)
+        sources = []
+        seen_urls = set()
+        for page in pages_for_ranking[:15]:
+            url = page.get('url', 'unknown')
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
 
-    sources = [{"url": p['url'], "relevance": round(p['score'], 3)} for p in all_pages[:10]]
+            source_info = {
+                "url": url,
+                "relevance": round(page.get('score', 0), 3)
+            }
+            if embedding_used and 'embedding_score' in page:
+                source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
+            sources.append(source_info)
 
-    return CrawlResponse(
-        success=True,
-        answer=answer,
-        confidence=0.5,
-        pages_crawled=pages_crawled,
-        sources=sources,
-        message=f"Adaptive fallback: {pages_crawled} pages",
-        embedding_used=embedding_used,
-        crawl_strategy="adaptive_fallback"
-    )
+        # ✅ FIXED: Proper format string
+        return CrawlResponse(
+            success=True,
+            answer=answer,
+            confidence=0.5,
+            pages_crawled=pages_crawled,
+            sources=sources,
+            message=(
+                f"Deep crawl complete (SOLUTION 5 applied): {pages_crawled} pages (fallback mode)" +
+                (" (with OpenRouter re-ranking)" if embedding_used else "")
+            ),
+            embedding_used=embedding_used
+        )
 
 
-# ============================================================================
-# Main Entry Point
-# ============================================================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    print(f"Starting Crawl4AI Hybrid BFS Crawler v3.8.0 on port {port}...", flush=True)
+    print(f"Starting server on port {port}...", flush=True)
     uvicorn.run(
         app,
         host="0.0.0.0",
