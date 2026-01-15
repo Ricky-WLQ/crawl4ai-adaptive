@@ -1,89 +1,177 @@
+# ============================================================================
+# PRODUCTION-READY DOCKERFILE - Crawl4AI v5.0.0
+# Multi-Stage Build | Security Hardened | Production Best Practices
+# ============================================================================
+
+# ============================================================================
+# STAGE 1: BUILDER - Compile dependencies
+# ============================================================================
+FROM python:3.11-slim as builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /builder
+
+COPY requirements.txt .
+
+# Pre-compile wheels for faster installation
+RUN pip install --upgrade pip setuptools wheel && \
+    pip wheel --no-cache-dir --no-deps --wheel-dir /builder/wheels -r requirements.txt
+
+# ============================================================================
+# STAGE 2: RUNTIME - Minimal production image
+# ============================================================================
 FROM python:3.11-slim
 
-LABEL "language"="python"
-LABEL "framework"="fastapi"
-LABEL "version"="3.7.0"
+LABEL maintainer="your-team@example.com" \
+      version="5.0.0" \
+      description="Crawl4AI - Two-Phase Hybrid Crawler"
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV CRAWL4AI_HEADLESS=true
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ENV HF_HOME=/app/.cache/huggingface
+# ============================================================================
+# ENVIRONMENT CONFIGURATION
+# ============================================================================
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    CRAWL4AI_HEADLESS=true \
+    PLAYWRIGHT_BROWSERS_PATH=/app/.browsers \
+    HF_HOME=/app/.cache/huggingface \
+    TORCH_HOME=/app/.cache/torch \
+    TRANSFORMERS_CACHE=/app/.cache/transformers \
+    PORT=8080 \
+    LOG_FILE=/app/logs/crawl4ai.log \
+    LOG_LEVEL=INFO \
+    DEEPSEEK_API_KEY="" \
+    OPENROUTER_API_KEY="" \
+    CRAWL_API_KEY="" \
+    REQUIRE_API_KEY="false" \
+    CORS_ORIGINS="*"
 
-# Install system dependencies for Playwright/Chromium
+# ============================================================================
+# SYSTEM DEPENDENCIES (For Playwright/Chromium)
+# ============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
+    curl \
     ca-certificates \
     fonts-liberation \
+    fonts-dejavu-core \
     libasound2 \
+    libpulse0 \
+    libopus0 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
+    libatspi2.0-0 \
+    libxkbcommon0 \
+    libxkbcommon-x11-0 \
     libcups2 \
     libdbus-1-3 \
     libdrm2 \
     libgbm1 \
+    libgl1-mesa-glx \
     libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
+    libgtk-3-common \
     libxcomposite1 \
     libxdamage1 \
+    libxext6 \
     libxfixes3 \
-    libxkbcommon0 \
     libxrandr2 \
-    xdg-utils \
+    libxrender1 \
+    libxshmfence1 \
+    libxss1 \
+    libxtst6 \
+    libnspr4 \
+    libnss3 \
     libu2f-udev \
     libvulkan1 \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ============================================================================
+# CREATE APPLICATION DIRECTORIES
+# ============================================================================
+RUN mkdir -p /app /app/logs /app/.cache /app/.browsers && \
+    chmod 755 /app
 
 WORKDIR /app
 
-# Copy requirements first for Docker layer caching
+# ============================================================================
+# INSTALL PYTHON DEPENDENCIES
+# ============================================================================
+COPY --from=builder /builder/wheels /tmp/wheels
 COPY requirements.txt .
 
-# Install Python dependencies with optimizations
-RUN pip install --no-cache-dir --compile -r requirements.txt && \
-    pip install --no-cache-dir playwright
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir --no-index --find-links=/tmp/wheels -r requirements.txt && \
+    rm -rf /tmp/wheels
 
-# Install Playwright browsers (Chromium only - saves ~400MB)
-RUN python -m playwright install chromium && \
-    python -m playwright install-deps chromium && \
-    rm -rf /tmp/* /var/tmp/*
+# ============================================================================
+# CRAWL4AI INSTALLATION & SETUP
+# ============================================================================
+RUN pip install --no-cache-dir 'crawl4ai[all]>=0.3.0' && \
+    crawl4ai-setup 2>&1 | tail -10
 
-# SOLUTION 2: Pre-download multilingual embedding model
-# paraphrase-multilingual-mpnet-base-v2 (~500MB)
-# Supports 50+ languages including Chinese, English, Portuguese
-RUN python << 'EOF'
-import sys
-try:
-    print("Downloading SOLUTION 2 model: paraphrase-multilingual-mpnet-base-v2...", flush=True)
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
-    print("✓ Model downloaded successfully! Size: ~500MB", flush=True)
-    print("✓ Supports 50+ languages including Chinese, English, Portuguese", flush=True)
-except Exception as e:
-    print(f"❌ Error downloading model: {e}", flush=True)
-    sys.exit(1)
-EOF
+# ============================================================================
+# PLAYWRIGHT BROWSER INSTALLATION
+# ============================================================================
+RUN playwright install chromium --with-deps 2>&1 | tail -10
 
-# Clean up cache and temporary files to reduce image size
-RUN rm -rf /tmp/* /var/tmp/* /root/.cache/* && \
-    find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+# ============================================================================
+# COPY APPLICATION CODE
+# ============================================================================
+COPY main.py /app/main.py
 
-# Copy application code (AFTER dependencies are installed)
-COPY main.py .
+# Verify syntax
+RUN python -m py_compile /app/main.py
 
-# FIX: Copy .env.example using RUN with proper error handling
-# This is optional, so we use shell commands
-RUN if [ -f .env.example ]; then cp .env.example .; fi || true
+# ============================================================================
+# CLEANUP
+# ============================================================================
+RUN apt-get autoremove -y && apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache/* && \
+    find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /app -type f -name "*.pyc" -delete && \
+    find /app -type f -name "*.pyo" -delete && \
+    pip cache purge
 
-# Expose port
-EXPOSE 8080
+# ============================================================================
+# SECURITY: NON-ROOT USER
+# ============================================================================
+RUN groupadd -r crawl4ai && useradd -r -g crawl4ai -u 1001 crawl4ai && \
+    chown -R crawl4ai:crawl4ai /app && \
+    chmod -R 750 /app && \
+    chmod 777 /app/logs /app/.cache /app/.browsers
 
-# ✅ FIX: Health check with SIMPLE single-line command (no heredoc)
-# Multi-line python << 'EOF' syntax doesn't work in HEALTHCHECK CMD
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import httpx; response = httpx.get('http://localhost:8080/health', timeout=5); exit(0 if response.status_code == 200 else 1)" || exit 1
+USER crawl4ai
 
-# Start the application
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -sf http://localhost:${PORT}/health || exit 1
+
+# ============================================================================
+# EXPOSE PORT
+# ============================================================================
+EXPOSE ${PORT}
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+VOLUME ["/app/logs", "/app/.cache", "/app/.browsers"]
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
 CMD ["python", "main.py"]
