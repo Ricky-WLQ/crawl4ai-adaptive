@@ -1,17 +1,19 @@
 FROM python:3.11-slim
 
+LABEL "language"="python"
+LABEL "framework"="fastapi"
+LABEL "version"="3.6.2"
+
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-
-# Crawl4AI specific settings
 ENV CRAWL4AI_HEADLESS=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV HF_HOME=/app/.cache/huggingface
 
 # Install system dependencies for Playwright/Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
-    gnupg \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -32,41 +34,64 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 WORKDIR /app
 
-# Copy requirements first for caching
+# Copy requirements first for Docker layer caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies with optimizations
+RUN pip install --no-cache-dir --compile -r requirements.txt && \
+    pip install --no-cache-dir playwright
 
-# Run crawl4ai setup to install browsers
-RUN crawl4ai-setup
+# Install Playwright browsers (Chromium only - saves ~400MB)
+RUN python -m playwright install chromium && \
+    python -m playwright install-deps chromium && \
+    rm -rf /tmp/* /var/tmp/*
 
-# SOLUTION 2 FIX: Pre-download MULTILINGUAL sentence-transformers model
-# Updated from MiniLM-L12-v2 to mpnet-base-v2 (better for legal documents)
-# Model is ~500MB, supports 50+ languages including Chinese
-# This avoids delay on first request
-RUN python -c "from sentence_transformers import SentenceTransformer; \
-    print('Downloading SOLUTION 2 model: paraphrase-multilingual-mpnet-base-v2...'); \
-    SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2'); \
-    print('Model downloaded successfully!')"
+# SOLUTION 2: Pre-download multilingual embedding model
+# paraphrase-multilingual-mpnet-base-v2 (~500MB)
+# Supports 50+ languages including Chinese, English, Portuguese
+RUN python << 'EOF'
+import sys
+try:
+    print("Downloading SOLUTION 2 model: paraphrase-multilingual-mpnet-base-v2...", flush=True)
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+    print("✓ Model downloaded successfully! Size: ~500MB", flush=True)
+    print("✓ Supports 50+ languages including Chinese, English, Portuguese", flush=True)
+except Exception as e:
+    print(f"❌ Error downloading model: {e}", flush=True)
+    sys.exit(1)
+EOF
 
-# Optional: Pre-download OpenRouter embedding model metadata (for faster inference)
-# This is lightweight and doesn't require actual model download
-RUN python -c "import httpx; print('OpenRouter embeddings client ready')" || true
+# Clean up cache and temporary files to reduce image size
+RUN rm -rf /tmp/* /var/tmp/* /root/.cache/* && \
+    find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
-# Copy application code
-COPY . .
+# Copy application code (AFTER dependencies are installed)
+COPY main.py .
 
-# Health check to ensure service is running
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8080/health', timeout=5)"
+# FIX: Copy .env.example using RUN with proper error handling
+# This is optional, so we use shell commands
+RUN if [ -f .env.example ]; then cp .env.example .; fi || true
 
 # Expose port
 EXPOSE 8080
+
+# Health check with proper error handling
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python << 'EOF' || exit 1
+import sys
+try:
+    import httpx
+    response = httpx.get('http://localhost:8080/health', timeout=5)
+    sys.exit(0 if response.status_code == 200 else 1)
+except Exception as e:
+    print(f"Health check failed: {e}", flush=True)
+    sys.exit(1)
+EOF
 
 # Start the application
 CMD ["python", "main.py"]
