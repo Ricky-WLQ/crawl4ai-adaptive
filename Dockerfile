@@ -80,18 +80,10 @@ RUN if [ -f .env.example ]; then cp .env.example .; fi || true
 # Expose port
 EXPOSE 8080
 
-# Health check with proper error handling
+# ✅ FIX: Health check with SIMPLE single-line command (no heredoc)
+# Multi-line python << 'EOF' syntax doesn't work in HEALTHCHECK CMD
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python << 'EOF' || exit 1
-import sys
-try:
-    import httpx
-    response = httpx.get('http://localhost:8080/health', timeout=5)
-    sys.exit(0 if response.status_code == 200 else 1)
-except Exception as e:
-    print(f"Health check failed: {e}", flush=True)
-    sys.exit(1)
-EOF
+    CMD python -c "import httpx; response = httpx.get('http://localhost:8080/health', timeout=5); exit(0 if response.status_code == 200 else 1)" || exit 1
 
 # Start the application
 CMD ["python", "main.py"]
