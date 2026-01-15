@@ -4,8 +4,8 @@ Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRoute
 EMBEDDING STRATEGY (Semantic Crawling - NO API NEEDED!):
 - Uses LOCAL sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 - Supports 50+ languages including Chinese, English, and more
-- Optimized stopping criteria to prevent early termination
-- Semantic link selection understands meaning, not just keywords
+- FORCE EXPLORATION: confidence_threshold=0.1, min_gain_threshold=0
+- Disables early stopping to ensure thorough crawling
 
 FALLBACK (if use_embeddings=false):
 - Uses BM25 statistical strategy (keyword-based)
@@ -16,7 +16,7 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.5.1
+Version: 3.5.2
 """
 
 import os
@@ -211,14 +211,14 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.5.1 Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.5.2 Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
     print("=" * 60, flush=True)
     print("EMBEDDING Strategy (LOCAL MULTILINGUAL - No API needed!):", flush=True)
     print("  - Model: paraphrase-multilingual-MiniLM-L12-v2 (50+ languages)", flush=True)
-    print("  - Optimized stopping criteria for thorough crawling", flush=True)
+    print("  - FORCE EXPLORATION: confidence=0.1, min_gain=0", flush=True)
     if openrouter_configured:
         print("  - Re-ranking: OpenRouter qwen3-embedding-8b", flush=True)
     print("  - Answer Generation: DeepSeek-reasoner", flush=True)
@@ -230,7 +230,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
     description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning",
-    version="3.5.1",
+    version="3.5.2",
     lifespan=lifespan
 )
 
@@ -354,7 +354,7 @@ async def root():
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
-        "version": "3.5.1",
+        "version": "3.5.2",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "openrouter_reranking": openrouter_configured,
@@ -464,8 +464,8 @@ async def run_adaptive_crawl(
     """Run crawl using AdaptiveCrawler with LOCAL EMBEDDING strategy + OpenRouter re-ranking.
 
     EMBEDDING STRATEGY (LOCAL - No API needed!):
-    - Uses sentence-transformers/all-MiniLM-L6-v2 for embeddings
-    - Runs entirely on the server
+    - Uses sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 for embeddings
+    - Runs entirely on the server (50+ languages supported)
 
     FALLBACK (when use_embeddings=false):
     - BM25 statistical strategy (keyword-based)
@@ -477,33 +477,31 @@ async def run_adaptive_crawl(
         # Use EMBEDDING strategy with LOCAL sentence-transformers
         # No API key needed for embeddings - runs locally on server!
         print("Using EMBEDDING strategy for semantic link selection", flush=True)
-        print("  Embeddings: LOCAL sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", flush=True)
+        print("  Model: paraphrase-multilingual-MiniLM-L12-v2 (50+ languages)", flush=True)
+        print("  Force exploration: confidence_threshold=0.1, min_gain_threshold=0", flush=True)
 
         config = AdaptiveConfig(
             strategy="embedding",
             # Use MULTILINGUAL model for Chinese/English support (50+ languages)
             embedding_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-            # DO NOT set embedding_llm_config - it overrides local model!
-            confidence_threshold=request.confidence_threshold,
+            # FORCE EXPLORATION - override user's confidence_threshold
+            confidence_threshold=0.1,  # Very low to force crawling more pages
             max_pages=request.max_pages,
-            top_k_links=15,  # Increased from 5 to explore more links
-            min_gain_threshold=0.01,  # Lowered to avoid early stopping
-            n_query_variations=5,  # Query variations
-            # CRITICAL: Lower stopping thresholds to prevent early stopping
-            embedding_min_relative_improvement=0.01,  # Default 0.1 was too high
-            embedding_validation_min_score=0.05,      # Default 0.3 was too high
-            embedding_min_confidence_threshold=0.01,  # Default 0.1 was too high
+            top_k_links=15,  # Follow many links per page
+            min_gain_threshold=0,  # ZERO - disable early stopping completely
+            n_query_variations=5,  # Query variations for better coverage
         )
         used_embedding_crawl = True
     else:
         # Fallback to statistical strategy if use_embeddings=false
         print("Using STATISTICAL (BM25) strategy", flush=True)
+        print("  Force exploration: confidence_threshold=0.1, min_gain_threshold=0", flush=True)
         config = AdaptiveConfig(
             strategy="statistical",
-            confidence_threshold=request.confidence_threshold,
+            confidence_threshold=0.1,  # Very low to force crawling
             max_pages=request.max_pages,
-            top_k_links=15,  # Increased from 5
-            min_gain_threshold=0.01  # Lowered
+            top_k_links=15,
+            min_gain_threshold=0  # ZERO - disable early stopping
         )
         used_embedding_crawl = False
 
@@ -546,8 +544,8 @@ async def run_adaptive_crawl(
         # Get relevant content from knowledge base
         relevant_pages = adaptive.get_relevant_content(top_k=20)  # Get more for re-ranking
 
-        # Determine which crawl strategy was used (no longer depends on OpenRouter)
-        used_embedding_crawl = LLMCONFIG_AVAILABLE and request.use_embeddings
+        # used_embedding_crawl was already set above based on request.use_embeddings
+        # (Local sentence-transformers doesn't need LLMConfig)
         strategy_name = "Embedding" if used_embedding_crawl else "BM25"
         print(f"\n{strategy_name} top pages:", flush=True)
         for i, page in enumerate(relevant_pages[:5], 1):
