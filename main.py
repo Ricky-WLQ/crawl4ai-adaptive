@@ -1,3 +1,6 @@
+
+
+
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
@@ -604,15 +607,16 @@ def extract_pages_from_result(result) -> List[dict]:
                             if content:
                                 content_str = str(content).strip()
                                 if len(content_str) > 50:
-                                extracted_page = {
-                                    'url': doc.get('url', f'doc_{i}'),
-                                    'content': str(content),
-                                    'score': float(doc.get('score', 0.5))
-                                }
-                                print(f"      ✓ Extracted: {len(extracted_page['content'])} chars from {extracted_page['url'][:60]}", flush=True)
+                                    extracted_page = {
+                                        'url': doc.get('url', f'doc_{i}'),
+                                        'content': content_str,
+                                        'score': float(doc.get('score', 0.5))
+                                    }
+                                    print(f"      ✓ Extracted: {len(extracted_page['content'])} chars from {extracted_page['url'][:60]}", flush=True)
+                                else:
+                                    print(f"      ✗ Content too short ({len(content_str)} chars)", flush=True)
                             else:
-                                content_len = len(str(content)) if content else 0
-                                print(f"      ✗ Content too short ({content_len} chars) or empty", flush=True)
+                                print(f"      ✗ Content is empty", flush=True)
                         
                         elif hasattr(doc, '__dict__'):
                             # Object with attributes
@@ -625,7 +629,7 @@ def extract_pages_from_result(result) -> List[dict]:
                             for attr_name in ['content', 'text', 'markdown', 'body', 'data', 'page_content']:
                                 if hasattr(doc, attr_name):
                                     val = getattr(doc, attr_name, None)
-                                    if val and len(str(val)) > 50:
+                                    if val and len(str(val).strip()) > 50:
                                         content = val
                                         content_attr = attr_name
                                         print(f"      Found .{attr_name}: {len(str(val))} chars", flush=True)
@@ -641,9 +645,10 @@ def extract_pages_from_result(result) -> List[dict]:
                                         break
                             
                             if content:
+                                content_str = str(content).strip()
                                 extracted_page = {
                                     'url': url or f'doc_{i}',
-                                    'content': str(content),
+                                    'content': content_str,
                                     'score': float(getattr(doc, 'score', 0.5))
                                 }
                                 print(f"      ✓ Extracted: {len(extracted_page['content'])} chars", flush=True)
@@ -691,13 +696,15 @@ def extract_pages_from_result(result) -> List[dict]:
                         try:
                             if isinstance(item, dict):
                                 content = item.get('content') or item.get('text')
-                                if content and len(str(content)) > 50:
-                                    pages.append({
-                                        'url': item.get('url', f'relevant_{j}'),
-                                        'content': str(content),
-                                        'score': float(item.get('score', 0.5))
-                                    })
-                                    print(f"      ✓ Added from get_relevant_content: {len(str(content))} chars", flush=True)
+                                if content:
+                                    content_str = str(content).strip()
+                                    if len(content_str) > 50:
+                                        pages.append({
+                                            'url': item.get('url', f'relevant_{j}'),
+                                            'content': content_str,
+                                            'score': float(item.get('score', 0.5))
+                                        })
+                                        print(f"      ✓ Added from get_relevant_content: {len(content_str)} chars", flush=True)
                         except Exception as e:
                             print(f"      Error processing item {j}: {e}", flush=True)
             except Exception as e:
@@ -708,7 +715,8 @@ def extract_pages_from_result(result) -> List[dict]:
             print(f"\n  ❌ NO PAGES EXTRACTED!", flush=True)
             if hasattr(result, 'crawled_urls') and result.crawled_urls:
                 print(f"  ℹ️  But {len(result.crawled_urls)} URLs were crawled:", flush=True)
-                for url in result.crawled_urls[:5]:
+                crawled_urls_list = list(result.crawled_urls)[:5]
+                for url in crawled_urls_list:
                     print(f"      - {url}", flush=True)
             
             if hasattr(result, 'documents_with_terms'):
@@ -717,7 +725,8 @@ def extract_pages_from_result(result) -> List[dict]:
             
             print(f"\n  DEBUGGING INFO:", flush=True)
             print(f"    Result type: {type(result).__name__}", flush=True)
-            print(f"    Result attributes: {[a for a in dir(result) if not a.startswith('_')][:20]}", flush=True)
+            result_attrs = [a for a in dir(result) if not a.startswith('_')]
+            print(f"    Result attributes: {result_attrs[:20]}", flush=True)
             
     except Exception as e:
         print(f"  ❌ EXCEPTION in extract_pages_from_result: {e}", flush=True)
