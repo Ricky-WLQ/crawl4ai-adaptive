@@ -1,6 +1,3 @@
-
-
-
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
