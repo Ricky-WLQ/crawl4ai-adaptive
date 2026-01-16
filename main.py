@@ -535,6 +535,10 @@ class CrawlRequest(BaseModel):
         default=True,
         description="Enable OpenRouter re-ranking"
     )
+    include_external: Optional[bool] = Field(
+        default=False,
+        description="Follow external links (links to different domains). Enable for portal sites."
+    )
 
     @field_validator('start_url')
     @classmethod
@@ -881,7 +885,8 @@ async def custom_bfs_crawl(
     max_pages: int,
     max_depth: int,
     request_id: str,
-    crawl_config: Any
+    crawl_config: Any,
+    include_external: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Custom BFS crawler implementation that bypasses buggy BFSDeepCrawlStrategy.
@@ -889,6 +894,9 @@ async def custom_bfs_crawl(
     Fixes:
     - GitHub Issue #1349: Proper visited set management
     - GitHub Issue #1126: Proper relative URL resolution
+
+    Args:
+        include_external: If True, follow links to external domains (for portal sites)
 
     Returns list of crawled pages with content.
     """
@@ -907,7 +915,8 @@ async def custom_bfs_crawl(
         "request_id": request_id,
         "start_url": start_url,
         "max_pages": max_pages,
-        "max_depth": max_depth
+        "max_depth": max_depth,
+        "include_external": include_external
     })
 
     pages_crawled = 0
@@ -975,8 +984,8 @@ async def custom_bfs_crawl(
                     if link in visited:
                         continue
 
-                    # Only follow same-domain links
-                    if not is_same_domain(start_url, link):
+                    # Domain filtering: skip external links unless include_external is True
+                    if not include_external and not is_same_domain(start_url, link):
                         continue
 
                     # Add to queue
@@ -1408,14 +1417,15 @@ async def run_hybrid_two_phase_crawl(
             # - Link discovery from result.links and HTML parsing
             # - Relative URL resolution with urljoin
             # - Proper visited set management
-            # - Same-domain filtering
+            # - Same-domain filtering (or external if include_external=True)
             all_crawled_pages = await custom_bfs_crawl(
                 crawler=crawler,
                 start_url=request.start_url,
                 max_pages=request.max_pages or DEFAULT_MAX_PAGES,
                 max_depth=request.max_depth or DEFAULT_MAX_DEPTH,
                 request_id=request_id,
-                crawl_config=crawl_config
+                crawl_config=crawl_config,
+                include_external=request.include_external or False
             )
 
             LOGGER.info("Custom BFS crawl complete", extra={
